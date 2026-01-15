@@ -1,0 +1,65 @@
+{
+  "IDAMetadataDescriptorVersion": 1,
+  "plugin": {
+    "name": "DeepExtract",
+    "entryPoint": "main.py",
+    "version": "0.0.5",
+    "idaVersions": [
+      "9.0",
+      "9.1",
+      "9.2"
+    ],
+    "platforms": [
+      "windows-x86_64"
+    ],
+    "description": "A headless IDA Pro plugin that extracts PE binaries into structured SQLite databases and AI-ready C++ source files—capturing metadata, decompiled code, cross-references, vtable hierarchies, and dangerous API calls. DeepExtract powers autonomous vulnerability discovery agents, grounds manual code review in tools like Claude Code and Cursor with clean decompiled exports, and enables enterprise-scale threat hunting across thousands of executables.",
+    "license": "MIT",
+    "logoPath": "images/logo.png",
+    "categories": [
+      "decompilation",
+      "vulnerability-research-and-exploit-development",
+      "api-scripting-and-automation",
+      "malware-analysis",
+      "other"
+    ],
+    "keywords": [
+      "decompiler",
+      "extraction",
+      "sqlite",
+      "ai",
+      "headless",
+      "vulnerability-research",
+      "binary-analysis",
+      "pe-analysis",
+      "cross-references",
+      "vtable",
+      "callgraph",
+      "batch-processing",
+      "llm",
+      "agentic",
+      "threat-hunting",
+      "code-export",
+      "langgraph",
+      "mcp",
+      "model-context-protocol",
+      "cyber-reasoning-system",
+      "static-analysis",
+      "loop-analysis",
+      "vtable-reconstruction",
+      "semantic-analysis",
+      "data-flow",
+      "dotnet",
+      "clr-metadata"
+    ],
+    "pythonDependencies": [],
+    "urls": {
+      "repository": "https://github.com/marcosd4h/DeepExtractIDA"
+    },
+    "authors": [
+      {
+        "name": "Marcos Oviedo",
+        "email": "moviedo@gmail.com"
+      }
+    ]
+  }
+}
