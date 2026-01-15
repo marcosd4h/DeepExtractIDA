@@ -1,0 +1,131 @@
+name: Package and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a release (only works with tags)"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get version from tag
+        id: get_version
+        shell: bash
+        run: |
+          PLUGIN_VERSION=$(jq -r '.plugin.version' ida-plugin.json)
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+            if [ "$PLUGIN_VERSION" != "$TAG_VERSION" ]; then
+              echo "Error: tag version ($TAG_VERSION) does not match ida-plugin.json plugin.version ($PLUGIN_VERSION)"
+              exit 1
+            fi
+            VERSION="$TAG_VERSION"
+          else
+            VERSION="$PLUGIN_VERSION"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Plugin version: $VERSION"
+
+      - name: Validate ida-plugin.json
+        shell: bash
+        run: |
+          # Basic JSON validation
+          if ! jq empty ida-plugin.json 2>/dev/null; then
+            echo "Error: ida-plugin.json is not valid JSON"
+            exit 1
+          fi
+
+          # Check required fields
+          NAME=$(jq -r '.plugin.name' ida-plugin.json)
+          VERSION=$(jq -r '.plugin.version' ida-plugin.json)
+          ENTRY=$(jq -r '.plugin.entryPoint' ida-plugin.json)
+          REPO=$(jq -r '.plugin.urls.repository' ida-plugin.json)
+          AUTHOR_EMAILS=$(jq '[.plugin.authors[]?.email, .plugin.maintainers[]?.email] | map(select(. != null and . != "")) | length' ida-plugin.json)
+
+          echo "Plugin Name: $NAME"
+          echo "Version: $VERSION"
+          echo "Entry Point: $ENTRY"
+          echo "Repository: $REPO"
+
+          if [ "$NAME" == "null" ] || [ -z "$NAME" ]; then
+            echo "Error: plugin.name is required"
+            exit 1
+          fi
+          if [ "$VERSION" == "null" ] || [ -z "$VERSION" ]; then
+            echo "Error: plugin.version is required"
+            exit 1
+          fi
+          if [ "$ENTRY" == "null" ] || [ -z "$ENTRY" ]; then
+            echo "Error: plugin.entryPoint is required"
+            exit 1
+          fi
+          if [ "$REPO" == "null" ] || [ -z "$REPO" ]; then
+            echo "Error: plugin.urls.repository is required"
+            exit 1
+          fi
+          if [ "$AUTHOR_EMAILS" -eq 0 ]; then
+            echo "Error: plugin.authors or plugin.maintainers with email is required"
+            exit 1
+          fi
+
+          echo "ida-plugin.json validation passed!"
+
+      - name: Create plugin archive
+        shell: bash
+        run: |
+          # Create artifacts directory
+          mkdir -p artifacts
+
+          # Package the plugin files into a ZIP archive
+          # Include: ida-plugin.json, main.py, deep_extract/, images/
+          zip -r artifacts/DeepExtractIDA.zip \
+            ida-plugin.json \
+            main.py \
+            deep_extract \
+            images
+
+          echo "Created archive: DeepExtractIDA.zip"
+
+          # List archive contents for verification
+          echo "Archive contents:"
+          unzip -l artifacts/DeepExtractIDA.zip
+
+      - name: Install HCLI
+        shell: bash
+        run: |
+          python -m pip install ida-hcli
+
+      - name: Lint plugin archive
+        shell: bash
+        run: |
+          hcli plugin lint artifacts/DeepExtractIDA.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeepExtractIDA
+          path: artifacts/*.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.create_release == 'true')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
