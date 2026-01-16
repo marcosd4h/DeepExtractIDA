@@ -15,6 +15,20 @@ Interactive Usage:
 import sys
 from pathlib import Path
 
+# IMPORTANT: Always prioritize local deep_extract package over any installed version
+# This ensures we use the correct version when running via -S flag
+_script_dir = Path(__file__).resolve().parent
+if str(_script_dir) not in sys.path:
+    sys.path.insert(0, str(_script_dir))
+
+# Clear any cached deep_extract modules to ensure we load from the local path
+# This is necessary when an older version of the plugin is installed - IDA loads
+# it at startup, caching it in sys.modules. Without clearing, Python would use
+# the cached (old) version instead of reimporting from our local path.
+_modules_to_clear = [key for key in sys.modules if key == 'deep_extract' or key.startswith('deep_extract.')]
+for mod in _modules_to_clear:
+    del sys.modules[mod]
+
 # IDA Pro imports
 try:
     import ida_idaapi

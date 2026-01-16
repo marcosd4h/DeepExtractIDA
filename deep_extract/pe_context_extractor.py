@@ -489,6 +489,7 @@ def parse_arguments() -> Optional[dict]:
     # Config toggles (default False or None)
     parser.add_argument("--force-reanalyze", action="store_true", default=False)
     parser.add_argument("--generate-cpp", action="store_true", default=False)
+    parser.add_argument("--cpp-output-dir", type=str, default=None, help="Directory for C++ output files (defaults to extracted_raw_code/ next to db)")
     parser.add_argument("--thunk-depth", type=int, default=None)
     parser.add_argument("--min-call-conf", type=float, default=None)
 
@@ -1086,8 +1087,12 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
         else:
             module_name = cpp_generator.CppGenerator.sanitize_filename(name_without_ext)
         
-        db_dir = config.sqlite_db_path.parent
-        extracted_code_dir = db_dir / "extracted_raw_code"
+        # Use custom cpp_output_dir if provided, otherwise default to extracted_raw_code/ next to db
+        if config.cpp_output_dir:
+            extracted_code_dir = config.cpp_output_dir
+        else:
+            db_dir = config.sqlite_db_path.parent
+            extracted_code_dir = db_dir / "extracted_raw_code"
         module_dir = extracted_code_dir / module_name
         
         generator = cpp_generator.CppGenerator(

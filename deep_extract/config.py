@@ -68,6 +68,7 @@ class AnalysisConfig:
     extract_advanced_pe: bool = True
     extract_runtime_info: bool = True
     generate_cpp: bool = False
+    cpp_output_dir: Optional[Path] = None  # Custom directory for C++ output (defaults to extracted_raw_code/ next to db)
     
     # Behavior flags
     force_reanalyze: bool = False
@@ -247,6 +248,7 @@ class AnalysisConfig:
             extract_advanced_pe=bool(args.get('extract_advanced_pe', True)),
             extract_runtime_info=bool(args.get('extract_runtime_info', True)),
             generate_cpp=bool(args.get('generate_cpp', False)),
+            cpp_output_dir=Path(args['cpp_output_dir']) if args.get('cpp_output_dir') else None,
             force_reanalyze=bool(args.get('force_reanalyze', False)),
             use_interprocedural_analysis=bool(args.get('use_interprocedural_analysis', True)),
             thunk_depth=thunk_depth,
