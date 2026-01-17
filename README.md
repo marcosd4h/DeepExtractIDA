@@ -91,20 +91,20 @@ Beyond raw code, the tool performs deep heuristics to find vulnerability signals
 
 ### Installation
 
-DeepExtract supports two deployment methods:
+DeepExtract supports multiple deployment methods:
 
 - **Plugin Deployment**: Installation into the IDA plugins directory for integrated headless and interactive execution.
 - **Standalone Execution**: Execution directly from the source directory.
 
-To install as a plugin, copy the entire repository structure to IDA's plugins directory:
+To install as a plugin, you can use `hcli`:
 
-- Windows: `%APPDATA%\Hex-Rays\IDA Pro\plugins\DeepExtract\`
-- Linux: `~/.idapro/plugins/DeepExtract/`
-- macOS: `~/Library/Application Support/IDA Pro/plugins/DeepExtract/`
+```bash
+hcli plugin install DeepExtract
+```
 
 ### Headless Batch Extraction (PowerShell Script)
 
-For large-scale analysis, use the `headless_batch_extractor.ps1` PowerShell script to automate batch processing with concurrent IDA instances.
+For large-scale analysis, clone the repository and use the `headless_batch_extractor.ps1` PowerShell script to automate batch processing with concurrent IDA instances.
 
 #### Features
 
@@ -354,6 +354,7 @@ If `--generate-cpp` is used, the tool creates a folder structure containing **on
 
 ## Technical Requirements
 
+- **Operating System:** Windows 10/11
 - **IDA Pro:** Version 9.0 or later (Pro edition required for headless mode)
 - **Decompiler:** Hex-Rays Decompiler (optional, but required for C-code generation and advanced analysis)
 - **Python:** Python 3 environment configured within IDA (built-in with IDA 9.x)
@@ -408,7 +409,7 @@ DeepExtract is packaged as an IDA 9.x plugin following Hex-Rays' HCLI plugin for
 **Compatibility:**
 
 - IDA Pro 9.0+
-- Windows, Linux, macOS
+- Windows
 - x86-64 architecture
 
 ---
