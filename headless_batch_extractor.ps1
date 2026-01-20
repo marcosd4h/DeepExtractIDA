@@ -1124,12 +1124,18 @@ function Format-Duration {
 function Write-TimingSummary {
     param(
         [Parameter(Mandatory = $true)]
-        [hashtable]$processInfo,
+        $processInfo,
         [Parameter(Mandatory = $true)]
-        [hashtable]$results,
+        $results,
         [Parameter(Mandatory = $true)]
         [int]$timeoutSeconds
     )
+    
+    # Validate inputs
+    if ($null -eq $processInfo -or $processInfo.Count -eq 0) {
+        Write-Host "No timing data available." -ForegroundColor Yellow
+        return
+    }
     
     # Collect timing data from all processes
     $timingData = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -1163,20 +1169,22 @@ function Write-TimingSummary {
             })
     }
     
-    # Sort by duration descending
-    $sortedData = $timingData | Sort-Object -Property DurationMinutes -Descending
+    # Sort by duration descending - ensure always an array
+    $sortedData = @($timingData | Sort-Object -Property DurationMinutes -Descending)
     
     # Calculate statistics
     $totalModules = $sortedData.Count
     if ($totalModules -eq 0) {
+        Write-Host "No timing data collected." -ForegroundColor Yellow
         return
     }
     
-    $completedCount = $results.SuccessfulFiles.Count
-    $failedCount = $results.FailedFiles.Count
+    $completedCount = if ($results.SuccessfulFiles) { $results.SuccessfulFiles.Count } else { 0 }
+    $failedCount = if ($results.FailedFiles) { $results.FailedFiles.Count } else { 0 }
     $timedOutCount = if ($results.TimedOutFiles) { $results.TimedOutFiles.Count } else { 0 }
     
-    $durations = $sortedData | ForEach-Object { $_.DurationMinutes }
+    # Ensure durations is always an array (single values need @() wrapper)
+    $durations = @($sortedData.DurationMinutes)
     $totalMinutes = ($durations | Measure-Object -Sum).Sum
     $avgMinutes = $totalMinutes / $totalModules
     
@@ -1184,9 +1192,13 @@ function Write-TimingSummary {
     $wallClockMinutes = if ($results.BatchDurationMinutes) { $results.BatchDurationMinutes } else { 0 }
     
     # Calculate median
-    $sortedDurations = $durations | Sort-Object
-    if ($totalModules % 2 -eq 0) {
-        $medianMinutes = ($sortedDurations[$totalModules / 2 - 1] + $sortedDurations[$totalModules / 2]) / 2
+    $sortedDurations = @($durations | Sort-Object)
+    if ($totalModules -eq 1) {
+        $medianMinutes = $sortedDurations[0]
+    }
+    elseif ($totalModules % 2 -eq 0) {
+        $medianIdx = [int]($totalModules / 2)
+        $medianMinutes = ($sortedDurations[$medianIdx - 1] + $sortedDurations[$medianIdx]) / 2
     }
     else {
         $medianMinutes = $sortedDurations[[math]::Floor($totalModules / 2)]

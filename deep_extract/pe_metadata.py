@@ -68,6 +68,12 @@ def extract_detailed_function_names(ea: int) -> Dict[str, str]:
     return _extract_names(ea)
 
 
+def get_extended_function_signature(ea: int) -> str:
+    """Forward reference to name_extraction module for full C-style prototype."""
+    from .name_extraction import get_extended_function_signature as _get_ext_sig
+    return _get_ext_sig(ea)
+
+
 def extract_imports() -> List[Dict[str, Any]]:
     """
     Extracts all imported functions from the binary's import address table (IAT).
@@ -137,13 +143,26 @@ def extract_imports() -> List[Dict[str, Any]]:
                     short_demangled_name = cleaned_name
                 if not long_demangled_name:
                     long_demangled_name = cleaned_name
+                
+                # Try to get extended signature with full type info from IDA's type system
+                extended_signature = get_extended_function_signature(ea)
+                
+                # Use extended signature if available, otherwise fall back to demangled name
+                if not extended_signature:
+                    extended_signature = long_demangled_name
+                else:
+                    # Replace sub_xxx placeholder with actual function name
+                    import re
+                    sub_pattern = rf'\bsub_{ea:X}\b'
+                    actual_name = short_demangled_name if short_demangled_name else cleaned_name
+                    extended_signature = re.sub(sub_pattern, actual_name, extended_signature, flags=re.IGNORECASE)
 
                 import_info = {
                     "address": f"0x{ea:X}",
                     "mangled_name": cleaned_name,
                     "raw_name": name_str,
                     "function_name": safe_decode(short_demangled_name),
-                    "function_signature_extended": safe_decode(long_demangled_name),
+                    "function_signature_extended": safe_decode(extended_signature),
                     "ordinal": ordinal,
                     "is_delay_loaded": False
                 }
@@ -205,8 +224,21 @@ def extract_exports() -> List[Dict[str, Any]]:
             if isinstance(name_str, bytes):
                  name_str = safe_decode(name_str)
 
-
             short_demangled_name, long_demangled_name = get_raw_long_function_name(name_str)
+            
+            # Get extended signature with full type info from IDA's type system
+            # This provides return type, parameter types, and calling convention
+            extended_signature = get_extended_function_signature(ea)
+            
+            # Use extended signature if available, otherwise fall back to demangled name
+            if not extended_signature:
+                extended_signature = long_demangled_name if long_demangled_name else name_str
+            else:
+                # Replace sub_xxx placeholder with actual function name
+                import re
+                sub_pattern = rf'\bsub_{ea:X}\b'
+                actual_name = short_demangled_name if short_demangled_name else name_str
+                extended_signature = re.sub(sub_pattern, actual_name, extended_signature, flags=re.IGNORECASE)
 
             # Check for forwarded export using the correct API
             is_forwarded = False
@@ -220,8 +252,8 @@ def extract_exports() -> List[Dict[str, Any]]:
                 "index": index,
                 "address": f"0x{ea:X}",
                 "mangled_name": name_str,
-                "function_name": safe_decode(short_demangled_name),
-                "function_signature_extended": safe_decode(long_demangled_name),
+                "function_name": safe_decode(short_demangled_name) if short_demangled_name else name_str,
+                "function_signature_extended": safe_decode(extended_signature),
                 "ordinal": ordinal,
                 "is_forwarded": is_forwarded
             }
@@ -313,13 +345,22 @@ def extract_all_entry_points() -> List[Dict[str, Any]]:
                         if func:
                             func_name = ida_funcs.get_func_name(func.start_ea)
                             mangled_name = func_name
-                            function_signature_extended = None
-                            if func_name:
-                                function_signature_extended = ida_name.demangle_name(func_name, ida_name.MNG_LONG_FORM)
                         else:
                             func_name = f"entry_{entry_ea:X}"
                             mangled_name = func_name
-                            function_signature_extended = None
+                        
+                        # Get extended signature with full type info from IDA's type system
+                        function_signature_extended = get_extended_function_signature(entry_ea)
+                        
+                        # Fall back to demangled name if type info not available
+                        if not function_signature_extended and mangled_name:
+                            function_signature_extended = ida_name.demangle_name(mangled_name, ida_name.MNG_LONG_FORM)
+                        elif function_signature_extended:
+                            # Replace sub_xxx placeholder with actual function name
+                            import re
+                            sub_pattern = rf'\bsub_{entry_ea:X}\b'
+                            actual_name = func_name or entry_name or f"sub_{entry_ea:X}"
+                            function_signature_extended = re.sub(sub_pattern, actual_name, function_signature_extended, flags=re.IGNORECASE)
                         
                         entry_info = {
                             "index": i,
@@ -411,7 +452,6 @@ def extract_all_entry_points_with_methods():
         
         if name_info and name_info.get('display_name'):
             function_name = name_info['display_name']
-            function_signature_extended = name_info.get('long_name', '')
             mangled_name = name_info.get('mangled_name', '')
             entry_name = mangled_name
         
@@ -419,6 +459,18 @@ def extract_all_entry_points_with_methods():
             function_name = f"entry_point_0x{entry_ea:X}"
             entry_name = function_name
             mangled_name = function_name
+        
+        # Get extended signature with full type info from IDA's type system
+        function_signature_extended = get_extended_function_signature(entry_ea)
+        
+        # Fall back to long demangled name if type info not available
+        if not function_signature_extended and name_info:
+            function_signature_extended = name_info.get('long_name', '')
+        elif function_signature_extended:
+            # Replace sub_xxx placeholder with actual function name
+            import re
+            sub_pattern = rf'\bsub_{entry_ea:X}\b'
+            function_signature_extended = re.sub(sub_pattern, function_name, function_signature_extended, flags=re.IGNORECASE)
 
         entry = {
             "address": f"0x{entry_ea:X}",
