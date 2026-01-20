@@ -140,10 +140,10 @@ def extract_imports() -> List[Dict[str, Any]]:
 
                 import_info = {
                     "address": f"0x{ea:X}",
-                    "name": cleaned_name,
+                    "mangled_name": cleaned_name,
                     "raw_name": name_str,
-                    "short_demangled_name": safe_decode(short_demangled_name),
-                    "long_demangled_name": safe_decode(long_demangled_name),
+                    "function_name": safe_decode(short_demangled_name),
+                    "function_signature_extended": safe_decode(long_demangled_name),
                     "ordinal": ordinal,
                     "is_delay_loaded": False
                 }
@@ -219,9 +219,9 @@ def extract_exports() -> List[Dict[str, Any]]:
             export_info = {
                 "index": index,
                 "address": f"0x{ea:X}",
-                "name": name_str,
-                "short_demangled_name": safe_decode(short_demangled_name),
-                "long_demangled_name": safe_decode(long_demangled_name),
+                "mangled_name": name_str,
+                "function_name": safe_decode(short_demangled_name),
+                "function_signature_extended": safe_decode(long_demangled_name),
                 "ordinal": ordinal,
                 "is_forwarded": is_forwarded
             }
@@ -312,27 +312,30 @@ def extract_all_entry_points() -> List[Dict[str, Any]]:
                         
                         if func:
                             func_name = ida_funcs.get_func_name(func.start_ea)
-                            demangled_name = None
+                            mangled_name = func_name
+                            function_signature_extended = None
                             if func_name:
-                                demangled_name = ida_name.demangle_name(func_name, ida_name.MNG_LONG_FORM)
+                                function_signature_extended = ida_name.demangle_name(func_name, ida_name.MNG_LONG_FORM)
                         else:
                             func_name = f"entry_{entry_ea:X}"
-                            demangled_name = None
+                            mangled_name = func_name
+                            function_signature_extended = None
                         
                         entry_info = {
                             "index": i,
                             "ordinal": entry_ordinal,
                             "address": f"0x{entry_ea:X}",
                             "entry_name": entry_name or "",
+                            "mangled_name": mangled_name or f"sub_{entry_ea:X}",
                             "function_name": func_name or f"sub_{entry_ea:X}",
-                            "demangled_name": demangled_name,
+                            "function_signature_extended": function_signature_extended,
                             "is_primary": i == 0
                         }
                         
                         entry_points.append(entry_info)
                         
                         if i == 0:
-                            debug_print(f"Primary entry point: {demangled_name or func_name} at 0x{entry_ea:X}")
+                            debug_print(f"Primary entry point: {function_signature_extended or func_name} at 0x{entry_ea:X}")
                             
             except Exception as e:
                 entry_ea_str = f"0x{entry_ea:X}" if 'entry_ea' in locals() and entry_ea != ida_idaapi.BADADDR else "unknown"
@@ -403,16 +406,19 @@ def extract_all_entry_points_with_methods():
 
         function_name = ""
         entry_name = ""
-        demangled_name = ""
+        mangled_name = ""
+        function_signature_extended = ""
         
         if name_info and name_info.get('display_name'):
             function_name = name_info['display_name']
-            demangled_name = name_info.get('long_name', '')
-            entry_name = name_info.get('mangled_name', '')
+            function_signature_extended = name_info.get('long_name', '')
+            mangled_name = name_info.get('mangled_name', '')
+            entry_name = mangled_name
         
         if not function_name:
             function_name = f"entry_point_0x{entry_ea:X}"
             entry_name = function_name
+            mangled_name = function_name
 
         entry = {
             "address": f"0x{entry_ea:X}",
@@ -422,8 +428,9 @@ def extract_all_entry_points_with_methods():
             "confidence": float(confidence),
             "is_primary": is_primary,
             "entry_name": entry_name,
+            "mangled_name": mangled_name,
             "function_name": function_name,
-            "demangled_name": demangled_name,
+            "function_signature_extended": function_signature_extended,
             "ordinal": ordinal,
             "index": index,
             "is_validated": True,
@@ -1421,15 +1428,41 @@ def extract_runtime_info(pe):
         if hasattr(pe, 'DIRECTORY_ENTRY_DELAY_IMPORT'):
             debug_print("Found Delay-Load Import Directory.")
             for dll in pe.DIRECTORY_ENTRY_DELAY_IMPORT:
+                raw_module_name = safe_decode(dll.dll)
+                resolved_module_name = constants.resolve_api_set(raw_module_name)
+                is_api_set = resolved_module_name != raw_module_name
+                
                 module_imports = {
-                    "module_name": safe_decode(dll.dll),
+                    "module_name": resolved_module_name,
+                    "raw_module_name": raw_module_name,
+                    "is_api_set": is_api_set,
+                    "resolved_module": resolved_module_name if is_api_set else None,
                     "functions": []
                 }
                 for imp in dll.imports:
                     if imp.name:
-                        module_imports["functions"].append({"name": safe_decode(imp.name), "ordinal": imp.ordinal})
+                        name_str = safe_decode(imp.name)
                     else:
-                        module_imports["functions"].append({"name": f"ord_{imp.ordinal}", "ordinal": imp.ordinal})
+                        name_str = f"ord_{imp.ordinal}" if imp.ordinal else f"unknown_delay_import"
+                    
+                    # Demangle names for consistency with regular imports
+                    short_demangled_name, long_demangled_name = get_raw_long_function_name(name_str)
+                    
+                    # If demangling failed, use the original name
+                    if not short_demangled_name:
+                        short_demangled_name = name_str
+                    if not long_demangled_name:
+                        long_demangled_name = name_str
+                    
+                    import_info = {
+                        "address": None,  # Delay-load imports don't have fixed addresses until loaded
+                        "mangled_name": name_str,
+                        "function_name": safe_decode(short_demangled_name),
+                        "function_signature_extended": safe_decode(long_demangled_name),
+                        "ordinal": imp.ordinal,
+                        "is_delay_loaded": True
+                    }
+                    module_imports["functions"].append(import_info)
                 runtime_info["delay_load_imports"].append(module_imports)
 
         # Check for .NET Assembly

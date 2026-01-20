@@ -423,7 +423,32 @@ class CppGenerator:
         
         # Exports with forwarding information
         self._write_json_section(md_file, "Exports", file_info['exports'] if 'exports' in row_keys else None)
-
+        
+        # PE Sections - memory layout and characteristics
+        self._write_json_section(md_file, "PE Sections", file_info['sections'] if 'sections' in row_keys else None)
+        
+        # Security Features - ASLR, DEP, CFG, etc.
+        self._write_json_section(md_file, "Security Features", file_info['security_features'] if 'security_features' in row_keys else None)
+        
+        # DLL Characteristics flags
+        self._write_json_section(md_file, "DLL Characteristics", file_info['dll_characteristics'] if 'dll_characteristics' in row_keys else None)
+        
+        # Rich Header - compiler/linker toolchain identification
+        self._write_json_section(md_file, "Rich Header", file_info['rich_header'] if 'rich_header' in row_keys else None)
+        
+        # TLS Callbacks - thread local storage callbacks (important for malware analysis)
+        self._write_json_section(md_file, "TLS Callbacks", file_info['tls_callbacks'] if 'tls_callbacks' in row_keys else None)
+        
+        # Load Config - SEH, CFG guard tables, etc.
+        self._write_json_section(md_file, "Load Configuration", file_info['load_config'] if 'load_config' in row_keys else None)
+        
+        # Exception Info - exception handling data
+        self._write_json_section(md_file, "Exception Information", file_info['exception_info'] if 'exception_info' in row_keys else None)
+        
+        # .NET/CLR Metadata - only if this is a .NET assembly
+        is_net = file_info['is_net_assembly'] if 'is_net_assembly' in row_keys else False
+        if is_net:
+            self._write_json_section(md_file, "CLR Metadata (.NET)", file_info['clr_metadata'] if 'clr_metadata' in row_keys else None)
 
 
 def generate_standalone_markdown_documentation(db_path: str, output_dir: str, module_name: str = None) -> bool:

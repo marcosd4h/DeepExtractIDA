@@ -329,9 +329,10 @@ def combine_imports(regular_imports: list, delay_load_imports: list) -> list:
         module_name_lower = dll['module_name'].lower()
         if module_name_lower in module_index:
             existing_mod = module_index[module_name_lower]
-            existing_func_names = {f['name'] for f in existing_mod['functions']}
+            # Use mangled_name for deduplication (fall back to function_name for compatibility)
+            existing_func_names = {f.get('mangled_name') or f.get('function_name') or f.get('name', '') for f in existing_mod['functions']}
             existing_mod['functions'].extend(
-                func for func in dll['functions'] if func['name'] not in existing_func_names
+                func for func in dll['functions'] if (func.get('mangled_name') or func.get('function_name') or func.get('name', '')) not in existing_func_names
             )
         else:
             base_list.append(dll)
