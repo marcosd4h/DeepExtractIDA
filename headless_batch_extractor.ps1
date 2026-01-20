@@ -674,12 +674,16 @@ function Update-CompletedProcessInfo {
     
     foreach ($p in $processes) {
         if ($p.HasExited) {
-            $info = $processInfo[$p.Id]
+            $info = $processInfo[$p.BaseName]
             if ($info -and -not $info.ContainsKey('ExitCode')) {
-                # Capture exit code while process object is still valid
+                # Capture exit code and duration while process object is still valid
                 try {
                     $info['ExitCode'] = $p.ExitCode
                     $info['CompletedTime'] = Get-Date
+                    # Calculate and store duration in minutes
+                    if ($info.StartTime) {
+                        $info['DurationMinutes'] = ($info['CompletedTime'] - $info['StartTime']).TotalMinutes
+                    }
                 }
                 catch {
                     # Process object may be in an invalid state
@@ -717,7 +721,7 @@ function Test-ProcessTimeouts {
     
     foreach ($p in $processes) {
         if (-not $p.HasExited) {
-            $info = $processInfo[$p.Id]
+            $info = $processInfo[$p.BaseName]
             if ($info -and $info.StartTime) {
                 $elapsed = ($currentTime - $info.StartTime).TotalSeconds
                 if ($elapsed -ge $timeoutSeconds) {
@@ -790,6 +794,7 @@ function Start-IDAProcesses {
     
     # Track total files attempted for accurate reporting (separate from $processes which gets filtered)
     $totalFilesAttempted = 0
+    $batchStartTime = Get-Date
 
     # Track files that couldn't be processed due to access issues
     $skippedFiles = @()
@@ -893,13 +898,15 @@ function Start-IDAProcesses {
             $processArgs.Add('"' + $file.FullName + '"')
             
             $commandLine = "$IDA_PATH $($processArgs -join ' ')"
-            Write-Host "Executing command: $commandLine"
+            # Use verbose-style gray for command output to keep the main log clean
+            Write-Host "Running: $commandLine" -ForegroundColor Gray
             
             # Use Hidden instead of Minimized for headless/CI compatibility
             $process = Start-Process -FilePath $IDA_PATH -ArgumentList $processArgs -PassThru -WindowStyle Hidden
+            $process | Add-Member -NotePropertyName "BaseName" -NotePropertyValue $baseNameForPaths
             $startTime = Get-Date
             
-            $processInfo[$process.Id] = @{
+            $processInfo[$baseNameForPaths] = @{
                 'FileName'    = $file.FullName
                 'BaseName'    = $baseNameForPaths
                 'DbPath'      = $dbPath
@@ -907,6 +914,7 @@ function Start-IDAProcesses {
                 'LogFile'     = $logFile
                 'IdbPath'     = $idbPath
                 'StartTime'   = $startTime
+                'Pid'         = $process.Id
             }
             
             $processes.Add($process)
@@ -943,10 +951,10 @@ function Start-IDAProcesses {
         $currentTime = Get-Date
         if (($currentTime - $lastStatusTime).TotalSeconds -ge $script:STATUS_UPDATE_INTERVAL_SECONDS) {
             if ($runningCount -gt 0) {
-                Write-Host "Still running: $runningCount processes (timeout: $($script:IDA_PROCESS_TIMEOUT_SECONDS / 3600) hours each)..."
+                Write-Host "Still running: $runningCount processes..."
                 # Show brief status of longest-running processes
                 foreach ($p in $activeProcesses | Select-Object -First 3) {
-                    $info = $processInfo[$p.Id]
+                    $info = $processInfo[$p.BaseName]
                     if ($info -and $info.StartTime) {
                         $elapsed = [math]::Round(($currentTime - $info.StartTime).TotalMinutes, 1)
                         Write-Host "  PID $($p.Id): $([System.IO.Path]::GetFileName($info.FileName)) - running for $elapsed minutes"
@@ -1000,48 +1008,33 @@ function Start-IDAProcesses {
         }
     }
     
-    # Report timed-out files
-    if ($timedOutFiles.Count -gt 0) {
-        Write-Warning "Some processes timed out (exceeded $($script:IDA_PROCESS_TIMEOUT_SECONDS / 3600) hour limit):"
-        foreach ($timedOut in $timedOutFiles) {
-            Write-Warning "  Timed out: $($timedOut.FileName)"
-            Write-Warning "    Elapsed: $($timedOut.ElapsedTime) hours"
-            Write-Warning "    Log: $($timedOut.LogFile)"
-            Write-Warning ""
-        }
-    }
-    
-    if ($failedFiles.Count -gt 0) {
-        Write-Warning "Some processes failed:"
-        foreach ($failed in $failedFiles) {
-            Write-Warning "  Failed: $($failed.FileName)"
-            Write-Warning "    Exit code: $($failed.ExitCode)"
-            Write-Warning "    Log: $($failed.LogFile)"
-            Write-Warning ""
-        }
-    }
-
-    # Report skipped files (couldn't access for hashing)
+    # Report skipped files (couldn't access for hashing) - these aren't in timing summary
     if ($skippedFiles.Count -gt 0) {
         Write-Warning "Some files were skipped (could not access for processing):"
         foreach ($skipped in $skippedFiles) {
             Write-Warning "  Skipped: $($skipped.FileName)"
             Write-Warning "    Reason: $($skipped.Reason)"
-            Write-Warning ""
         }
+        Write-Host ""
     }
     
     # Clear global process tracking - all processes have completed
     $script:ActiveIdaProcesses.Clear()
     
+    $batchEndTime = Get-Date
+    $batchDurationMinutes = ($batchEndTime - $batchStartTime).TotalMinutes
+    
     return @{
-        SuccessfulFiles = [array]$successfulFiles
-        FailedFiles     = [array]$failedFiles
-        TimedOutFiles   = [array]$timedOutFiles
-        SkippedFiles    = $skippedFiles
+        SuccessfulFiles      = [array]$successfulFiles
+        FailedFiles          = [array]$failedFiles
+        TimedOutFiles        = [array]$timedOutFiles
+        SkippedFiles         = $skippedFiles
         # Use totalFilesAttempted which accurately tracks all files we tried to process
         # (includes successful, failed, timed out; skippedFiles are counted separately as they never started)
-        TotalProcessed  = $totalFilesAttempted + $skippedFiles.Count
+        TotalProcessed       = $totalFilesAttempted + $skippedFiles.Count
+        BatchDurationMinutes = $batchDurationMinutes
+        # Include process info for timing summary
+        ProcessInfo          = $processInfo
     }
 }
 
@@ -1104,6 +1097,144 @@ function Write-ExtractionReport {
     
     Write-Host "Extraction report saved to: $reportPath"
     return $reportPath
+}
+
+# Function to format duration in human-readable format
+function Format-Duration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [double]$Minutes
+    )
+    
+    if ($Minutes -ge 60) {
+        $hours = [math]::Floor($Minutes / 60)
+        $mins = [math]::Round($Minutes % 60)
+        return "${hours}h ${mins}m"
+    }
+    elseif ($Minutes -ge 1) {
+        return "$([math]::Round($Minutes, 1)) min"
+    }
+    else {
+        $seconds = [math]::Round($Minutes * 60)
+        return "${seconds}s"
+    }
+}
+
+# Function to display timing summary
+function Write-TimingSummary {
+    param(
+        [Parameter(Mandatory = $true)]
+        [hashtable]$processInfo,
+        [Parameter(Mandatory = $true)]
+        [hashtable]$results,
+        [Parameter(Mandatory = $true)]
+        [int]$timeoutSeconds
+    )
+    
+    # Collect timing data from all processes
+    $timingData = [System.Collections.Generic.List[PSCustomObject]]::new()
+    
+    foreach ($entry in $processInfo.GetEnumerator()) {
+        $info = $entry.Value
+        $fileName = [System.IO.Path]::GetFileName($info.FileName)
+        
+        # Determine status
+        $status = "completed"
+        if ($info.ContainsKey('TimedOut') -and $info.TimedOut) {
+            $status = "timeout"
+        }
+        elseif ($info.ContainsKey('ExitCode') -and $info.ExitCode -ne 0) {
+            $status = "failed, exit code $($info.ExitCode)"
+        }
+        
+        # Get duration (use stored value or calculate from timeout)
+        $durationMinutes = 0
+        if ($info.ContainsKey('DurationMinutes')) {
+            $durationMinutes = $info.DurationMinutes
+        }
+        elseif ($info.ContainsKey('TimedOut') -and $info.TimedOut) {
+            $durationMinutes = $timeoutSeconds / 60
+        }
+        
+        $timingData.Add([PSCustomObject]@{
+                FileName        = $fileName
+                DurationMinutes = $durationMinutes
+                Status          = $status
+            })
+    }
+    
+    # Sort by duration descending
+    $sortedData = $timingData | Sort-Object -Property DurationMinutes -Descending
+    
+    # Calculate statistics
+    $totalModules = $sortedData.Count
+    if ($totalModules -eq 0) {
+        return
+    }
+    
+    $completedCount = $results.SuccessfulFiles.Count
+    $failedCount = $results.FailedFiles.Count
+    $timedOutCount = if ($results.TimedOutFiles) { $results.TimedOutFiles.Count } else { 0 }
+    
+    $durations = $sortedData | ForEach-Object { $_.DurationMinutes }
+    $totalMinutes = ($durations | Measure-Object -Sum).Sum
+    $avgMinutes = $totalMinutes / $totalModules
+    
+    # Calculate wall-clock time if available
+    $wallClockMinutes = if ($results.BatchDurationMinutes) { $results.BatchDurationMinutes } else { 0 }
+    
+    # Calculate median
+    $sortedDurations = $durations | Sort-Object
+    if ($totalModules % 2 -eq 0) {
+        $medianMinutes = ($sortedDurations[$totalModules / 2 - 1] + $sortedDurations[$totalModules / 2]) / 2
+    }
+    else {
+        $medianMinutes = $sortedDurations[[math]::Floor($totalModules / 2)]
+    }
+    
+    # Output summary
+    Write-Host ""
+    Write-Host "=== Module Timing Summary ===" -ForegroundColor Cyan
+    
+    # Only show timeout warning if any modules timed out
+    if ($timedOutCount -gt 0) {
+        Write-Host "WARNING: $timedOutCount module(s) exceeded $($timeoutSeconds / 3600)-hour timeout and were terminated" -ForegroundColor Yellow
+        foreach ($item in $sortedData) {
+            if ($item.Status -eq "timeout") {
+                Write-Host "  $($item.FileName): $(Format-Duration $item.DurationMinutes) (timeout)" -ForegroundColor Yellow
+            }
+        }
+        Write-Host ""
+    }
+    
+    Write-Host "Completed: $completedCount | Failed: $failedCount | Timed out: $timedOutCount"
+    $statsLine = "Process time: $(Format-Duration $totalMinutes) | Average: $(Format-Duration $avgMinutes) | Median: $(Format-Duration $medianMinutes)"
+    if ($wallClockMinutes -gt 0) {
+        $statsLine += " | Elapsed: $(Format-Duration $wallClockMinutes)"
+    }
+    Write-Host $statsLine
+    Write-Host ""
+    Write-Host "All modules (sorted by duration):"
+    
+    # Find the longest filename for alignment
+    $maxLen = ($sortedData | Measure-Object -Property FileName -Maximum).Maximum.Length
+    if ($maxLen -lt 20) { $maxLen = 20 }
+
+    foreach ($item in $sortedData) {
+        $durationStr = "{0,10}" -f (Format-Duration $item.DurationMinutes)
+        $padding = " " * ($maxLen - $item.FileName.Length)
+        $outputLine = "  $($item.FileName):$padding $durationStr"
+        
+        if ($item.Status -eq "completed") {
+            Write-Host $outputLine
+        }
+        elseif ($item.Status -eq "timeout") {
+            Write-Host "$outputLine (timeout)" -ForegroundColor Yellow
+        }
+        else {
+            Write-Host "$outputLine ($($item.Status))" -ForegroundColor Red
+        }
+    }
 }
 
 ################################################################
@@ -1226,18 +1357,9 @@ if ($files.Count -gt 0) {
         
         $reportPath = Write-ExtractionReport @reportParams
         
-        Write-Host ""
-        Write-Host "=== Extraction Summary ===" -ForegroundColor Cyan
-        Write-Host "Total files processed: $($results.TotalProcessed)"
-        Write-Host "Successful: $($results.SuccessfulFiles.Count)" -ForegroundColor Green
-        if ($results.SkippedFiles -and $results.SkippedFiles.Count -gt 0) {
-            Write-Host "Skipped (inaccessible): $($results.SkippedFiles.Count)" -ForegroundColor Gray
-        }
-        if ($results.TimedOutFiles -and $results.TimedOutFiles.Count -gt 0) {
-            Write-Host "Timed out: $($results.TimedOutFiles.Count)" -ForegroundColor Yellow
-        }
-        if ($results.FailedFiles.Count -gt 0) {
-            Write-Host "Failed: $($results.FailedFiles.Count)" -ForegroundColor Red
+        # Display timing summary for all modules
+        if ($results.ProcessInfo -and $results.ProcessInfo.Count -gt 0) {
+            Write-TimingSummary -processInfo $results.ProcessInfo -results $results -timeoutSeconds $script:IDA_PROCESS_TIMEOUT_SECONDS
         }
     }
     finally {
