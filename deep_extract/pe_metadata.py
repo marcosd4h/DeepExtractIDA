@@ -1481,7 +1481,7 @@ def extract_runtime_info(pe):
             debug_print("Found Delay-Load Import Directory.")
             for dll in pe.DIRECTORY_ENTRY_DELAY_IMPORT:
                 raw_module_name = safe_decode(dll.dll)
-                resolved_module_name = constants.resolve_api_set(raw_module_name)
+                resolved_module_name = constants.resolve_apiset(raw_module_name)
                 is_api_set = resolved_module_name != raw_module_name
                 
                 module_imports = {

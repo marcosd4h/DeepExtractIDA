@@ -34,7 +34,7 @@ try:
     from . import json_safety
     from . import schema
     from .config import AnalysisConfig
-    from .logging_utils import debug_print
+    from .logging_utils import debug_print, get_log_level
 except ImportError:
     # Running as standalone script - add parent directory to path so Python
     # recognizes 'extraction_tool' as a proper package with relative imports working
@@ -54,7 +54,7 @@ except ImportError:
     from extraction_tool import json_safety
     from extraction_tool import schema
     from extraction_tool.config import AnalysisConfig
-    from extraction_tool.logging_utils import debug_print
+    from extraction_tool.logging_utils import debug_print, get_log_level
 
 # Default SQLite PRAGMA settings for database connections
 _DEFAULT_SQLITE_PRAGMAS = {
@@ -627,7 +627,46 @@ def prepare_for_analysis(input_file_path, common_db_path, current_args, current_
         debug_print(traceback.format_exc())
         return False
 
-def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int]) -> Optional[Dict[str, Any]]:
+def _init_profile_stats() -> Dict[str, Any]:
+    return {
+        "stage_totals": {},
+        "stage_counts": {},
+        "stage_slowest": {},
+        "function_slowest": [],
+        "slow_limit": 5,
+    }
+
+
+def _profile_add_stage(profile: Optional[Dict[str, Any]], stage: str, duration: float, ea: Optional[int] = None, name: Optional[str] = None) -> None:
+    if not profile or duration is None:
+        return
+    if duration < 0:
+        duration = 0.0
+    profile["stage_totals"][stage] = profile["stage_totals"].get(stage, 0.0) + duration
+    profile["stage_counts"][stage] = profile["stage_counts"].get(stage, 0) + 1
+    if ea is not None and name:
+        current = profile["stage_slowest"].get(stage)
+        if current is None or duration > current[0]:
+            profile["stage_slowest"][stage] = (duration, ea, name)
+
+
+def _profile_track_slowest(profile: Optional[Dict[str, Any]], duration: float, ea: int, name: str) -> None:
+    if not profile or duration is None:
+        return
+    if duration < 0:
+        return
+    entries = profile["function_slowest"]
+    limit = profile.get("slow_limit", 5)
+    item = (duration, ea, name)
+    if len(entries) < limit:
+        entries.append(item)
+        return
+    min_idx = min(range(len(entries)), key=lambda i: entries[i][0])
+    if duration > entries[min_idx][0]:
+        entries[min_idx] = item
+
+
+def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int], profile: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Extracts data for a single function.
     
@@ -652,6 +691,7 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
         extended_signature = extractor_core.get_extended_function_signature(ea)
         
         # Assembly extraction
+        assembly_start = time.perf_counter()
         assembly_lines = []
         for curr_ea in idautils.FuncItems(func.start_ea):
             if len(assembly_lines) >= constants.MAX_ASSEMBLY_LINES:
@@ -659,6 +699,7 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             disasm = ida_lines.tag_remove(ida_lines.generate_disasm_line(curr_ea))
             if disasm:
                 assembly_lines.append(disasm)
+        _profile_add_stage(profile, "assembly", time.perf_counter() - assembly_start, ea, demangled_name)
         
         if len(assembly_lines) >= constants.MAX_ASSEMBLY_LINES:
             extractor_core.debug_print(f"WARNING - Function at 0x{ea:X} truncated (>{constants.MAX_ASSEMBLY_LINES} lines).")
@@ -672,6 +713,7 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
         # Decompilation
         decompiled_code = ""
         if has_decompiler:
+            decompile_start = time.perf_counter()
             try:
                 func_size = func.end_ea - func.start_ea
                 if func_size > constants.DECOMPILATION_SIZE_WARNING:
@@ -687,10 +729,12 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             except Exception as e:
                 decompiled_code = f"Decompilation failed: {str(e)}"
                 analysis_errors.append({"stage": "decompile", "error": str(e)})
+            _profile_add_stage(profile, "decompile", time.perf_counter() - decompile_start, ea, demangled_name)
         else:
             decompiled_code = "Decompiler not available"
 
         # Cross-references
+        xref_start = time.perf_counter()
         try:
             xref_data = extractor_core.extract_function_xrefs(ea)
         except Exception as e:
@@ -701,8 +745,10 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
                 "vtable_contexts": [],
                 "global_var_accesses": [],
             }
+        _profile_add_stage(profile, "xrefs", time.perf_counter() - xref_start, ea, demangled_name)
         
         # Simplify inbound xrefs (Include all refs targeting this function)
+        simplify_start = time.perf_counter()
         simple_inbound = []
         for xref in xref_data.get('inbound_xrefs', []):
             source_ea_str = xref.get('source_ea', '0x0')
@@ -764,15 +810,18 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
                 'xref_type': xref.get('xref_type', 'Unknown'),
                 'extraction_type': 'script'
             })
+        _profile_add_stage(profile, "xref_simplify", time.perf_counter() - simplify_start, ea, demangled_name)
 
         # Granular extractions
         loop_analysis = None
         if options.get('analyze_loops') and extractor_core.HAS_LOOP_DETECTOR:
+            loop_start = time.perf_counter()
             try:
                 loop_analysis = extractor_core.extract_loop_analysis(ea)
             except Exception as e:
                 loop_analysis = None
                 analysis_errors.append({"stage": "loop_analysis", "error": str(e)})
+            _profile_add_stage(profile, "loop_analysis", time.perf_counter() - loop_start, ea, demangled_name)
         # Normalize absent loop analysis to a stable JSON object shape
         if loop_analysis is None:
             loop_analysis = {"loops": [], "loop_count": 0, "analysis_available": False}
@@ -785,22 +834,27 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
 
         stack_frame = None
         if options.get('extract_stack_frame'):
+            stack_start = time.perf_counter()
             try:
                 stack_frame = extractor_core.extract_stack_frame_info(ea)
             except Exception as e:
                 stack_frame = None
                 analysis_errors.append({"stage": "stack_frame", "error": str(e)})
+            _profile_add_stage(profile, "stack_frame", time.perf_counter() - stack_start, ea, demangled_name)
         if stack_frame is None:
             stack_frame = {"local_vars_size": None, "args_size": None, "has_canary": None, "analysis_available": False}
 
         string_literals = None
         if options.get('extract_strings'):
+            strings_start = time.perf_counter()
             string_literals = list(string_map.get(ea, []))
+            _profile_add_stage(profile, "string_literals", time.perf_counter() - strings_start, ea, demangled_name)
         if string_literals is None:
             string_literals = []
 
         dangerous_calls = None
         if options.get('extract_dangerous_apis'):
+            dangerous_start = time.perf_counter()
             try:
                 dangerous_calls = extractor_core.check_for_dangerous_calls(xref_data["outbound_xrefs"])
                 if not json_safety.validate_json_field(dangerous_calls, "dangerous_api_calls")[0]:
@@ -808,6 +862,7 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             except Exception as e:
                 dangerous_calls = None
                 analysis_errors.append({"stage": "dangerous_api_calls", "error": str(e)})
+            _profile_add_stage(profile, "dangerous_calls", time.perf_counter() - dangerous_start, ea, demangled_name)
         if dangerous_calls is None:
             dangerous_calls = "[]"
 
@@ -854,6 +909,9 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         'analyze_loops': kwargs.get('analyze_loops', True),
     }
 
+    profile_enabled = get_log_level() in ("TRACE", "DEBUG")
+    profile = _init_profile_stats() if profile_enabled else None
+    
     try:
         input_file_path = ida_nalt.get_input_file_path()
         file_size = os.path.getsize(input_file_path)
@@ -861,15 +919,21 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         file_name = os.path.basename(input_file_path)
         _, file_extension = os.path.splitext(file_name)
         
+        string_map_start = time.perf_counter()
         string_map = extractor_core.build_string_map() if options['extract_strings'] else {}
+        _profile_add_stage(profile, "build_string_map", time.perf_counter() - string_map_start)
         
         # Enumerate functions once (IDA generators can be expensive on large binaries)
+        enum_start = time.perf_counter()
         function_addresses = list(idautils.Functions())
+        _profile_add_stage(profile, "enumerate_functions", time.perf_counter() - enum_start)
         num_functions = len(function_addresses)
         
         # Pre-calculate address to ID map for internal cross-references
         # SQLite PRIMARY KEYs start at 1
+        addr_map_start = time.perf_counter()
         addr_to_id = {ea: i + 1 for i, ea in enumerate(function_addresses)}
+        _profile_add_stage(profile, "build_addr_map", time.perf_counter() - addr_map_start)
         
         # Adaptive batch sizing
         if num_functions < constants.SMALL_BINARY_THRESHOLD:
@@ -940,18 +1004,27 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
 
             # Reanalyze
             debug_print("Reanalyzing all functions...")
+            reanalyze_start = time.perf_counter()
             for ea in function_addresses:
                 f = ida_funcs.get_func(ea)
                 if f: ida_funcs.reanalyze_function(f)
+            _profile_add_stage(profile, "reanalyze_functions", time.perf_counter() - reanalyze_start)
             
             # Process functions
             cursor.execute('BEGIN IMMEDIATE')
             batch_count = 0
             
             for idx, ea in enumerate(function_addresses):
-                func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id)
+                func_total_start = time.perf_counter()
+                func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id, profile=profile)
+                func_total_duration = time.perf_counter() - func_total_start
+                if profile_enabled:
+                    func_name = extractor_core.get_raw_function_name(ea)
+                    _profile_add_stage(profile, "process_function_total", func_total_duration, ea, func_name)
+                    _profile_track_slowest(profile, func_total_duration, ea, func_name)
                 
                 if func_data:
+                    insert_start = time.perf_counter()
                     cursor.execute('''
                         INSERT INTO functions (
                             function_id, function_signature, function_signature_extended, mangled_name, function_name,
@@ -967,20 +1040,39 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                             :string_literals, :dangerous_api_calls, :analysis_errors
                         )
                     ''', func_data)
+                    _profile_add_stage(profile, "db_insert", time.perf_counter() - insert_start)
                     functions_processed_count += 1
                     batch_count += 1
                 
                 # Batch commit
                 if batch_count >= BATCH_SIZE:
+                    commit_start = time.perf_counter()
                     cursor.execute('COMMIT')
                     cursor.execute('BEGIN IMMEDIATE')
+                    _profile_add_stage(profile, "db_commit", time.perf_counter() - commit_start)
                     batch_count = 0
                     debug_print(f"Committed batch. Total: {functions_processed_count}")
             
+            final_commit_start = time.perf_counter()
             cursor.execute('COMMIT')
+            _profile_add_stage(profile, "db_commit", time.perf_counter() - final_commit_start)
             
         duration = time.time() - overall_start_time
         debug_print(f"TRACE - Finished: extract_all_functions. Duration: {duration:.4f}s")
+        if profile_enabled and profile:
+            debug_print("TRACE - extract_all_functions profiling summary (per-stage totals):")
+            for stage, stage_time in sorted(profile["stage_totals"].items(), key=lambda item: item[1], reverse=True):
+                count = profile["stage_counts"].get(stage, 0)
+                avg = stage_time / count if count else 0.0
+                debug_print(f"TRACE -   {stage}: {stage_time:.2f}s over {count} calls (avg {avg:.4f}s)")
+            if profile["function_slowest"]:
+                debug_print("TRACE - Slowest functions (overall):")
+                for stage_time, ea, name in sorted(profile["function_slowest"], key=lambda item: item[0], reverse=True):
+                    debug_print(f"TRACE -   {name} @ 0x{ea:X}: {stage_time:.3f}s")
+            if profile["stage_slowest"]:
+                debug_print("TRACE - Slowest by stage:")
+                for stage, (stage_time, ea, name) in sorted(profile["stage_slowest"].items(), key=lambda item: item[1][0], reverse=True):
+                    debug_print(f"TRACE -   {stage}: {name} @ 0x{ea:X} ({stage_time:.3f}s)")
         return True
         
     except Exception as e:
