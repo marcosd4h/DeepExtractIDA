@@ -1143,6 +1143,9 @@ function Write-TimingSummary {
     foreach ($entry in $processInfo.GetEnumerator()) {
         $info = $entry.Value
         $fileName = [System.IO.Path]::GetFileName($info.FileName)
+        if ([string]::IsNullOrWhiteSpace($fileName)) {
+            $fileName = "<unknown>"
+        }
         
         # Determine status
         $status = "completed"
@@ -1220,21 +1223,19 @@ function Write-TimingSummary {
     }
     
     Write-Host "Completed: $completedCount | Failed: $failedCount | Timed out: $timedOutCount"
-    $statsLine = "Process time: $(Format-Duration $totalMinutes) | Average: $(Format-Duration $avgMinutes) | Median: $(Format-Duration $medianMinutes)"
-    if ($wallClockMinutes -gt 0) {
-        $statsLine += " | Elapsed: $(Format-Duration $wallClockMinutes)"
-    }
+    $elapsedLabel = if ($wallClockMinutes -gt 0) { Format-Duration $wallClockMinutes } else { "n/a" }
+    $statsLine = "Elapsed (wall-clock): $elapsedLabel | Total analysis time: $(Format-Duration $totalMinutes) | Average: $(Format-Duration $avgMinutes) | Median: $(Format-Duration $medianMinutes)"
     Write-Host $statsLine
     Write-Host ""
     Write-Host "All modules (sorted by duration):"
     
-    # Find the longest filename for alignment
-    $maxLen = ($sortedData | Measure-Object -Property FileName -Maximum).Maximum.Length
+    # Find the longest filename for alignment (measure by length, not lexicographic max)
+    $maxLen = ($sortedData | ForEach-Object { $_.FileName.Length } | Measure-Object -Maximum).Maximum
     if ($maxLen -lt 20) { $maxLen = 20 }
 
     foreach ($item in $sortedData) {
         $durationStr = "{0,10}" -f (Format-Duration $item.DurationMinutes)
-        $padding = " " * ($maxLen - $item.FileName.Length)
+        $padding = " " * [math]::Max(0, $maxLen - $item.FileName.Length)
         $outputLine = "  $($item.FileName):$padding $durationStr"
         
         if ($item.Status -eq "completed") {
