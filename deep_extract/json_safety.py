@@ -15,7 +15,7 @@ from .logging_utils import debug_print
 
 
 # Default size limits (configurable per-field if needed)
-DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # 10MB per JSON field
+DEFAULT_MAX_BYTES = 50 * 1024 * 1024  # 50MB per JSON field
 DEFAULT_MAX_LIST_ITEMS = 10000        # Max items in a list before truncation
 DEFAULT_MAX_DICT_KEYS = 5000          # Max keys in a dict before truncation
 DEFAULT_MAX_STRING_LENGTH = 100000    # Max string length before truncation
@@ -45,7 +45,7 @@ def to_json_safe(obj: Any,
     
     Args:
         obj: The object to serialize
-        max_bytes: Maximum size of output JSON in bytes (default: 10MB)
+        max_bytes: Maximum size of output JSON in bytes (default: 50MB)
         max_list_items: Maximum items in any list (default: 10000)
         max_dict_keys: Maximum keys in any dict (default: 5000)
         max_string_length: Maximum string length (default: 100000)

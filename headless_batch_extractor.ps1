@@ -221,7 +221,7 @@ $script:HASH_PREFIX_LENGTH = 10
 # Process management constants
 $script:PROCESS_KILL_WAIT_MS = 5000      # Wait time for graceful process termination
 $script:PROCESS_CLEANUP_WAIT_MS = 3000   # Wait time during cleanup termination
-$script:STATUS_UPDATE_INTERVAL_SECONDS = 30  # How often to print status updates
+$script:STATUS_UPDATE_INTERVAL_SECONDS = 300  # How often to print status updates (5 minutes)
 $script:PROCESS_POLL_INTERVAL_SECONDS = 5    # Polling interval in final wait loop
 
 # Add parameter validation at the start of the script
@@ -684,6 +684,20 @@ function Update-CompletedProcessInfo {
                     if ($info.StartTime) {
                         $info['DurationMinutes'] = ($info['CompletedTime'] - $info['StartTime']).TotalMinutes
                     }
+                    
+                    # Log completion notification
+                    $fileName = [System.IO.Path]::GetFileName($info.FileName)
+                    $durationStr = if ($info.DurationMinutes) { 
+                        "{0:N1} minutes" -f $info.DurationMinutes 
+                    } else { 
+                        "unknown duration" 
+                    }
+                    
+                    if ($p.ExitCode -eq 0) {
+                        Write-Host "Completed: $fileName (PID $($p.Id)) in $durationStr - Exit code: 0" -ForegroundColor Green
+                    } else {
+                        Write-Host "Completed: $fileName (PID $($p.Id)) in $durationStr - Exit code: $($p.ExitCode)" -ForegroundColor Yellow
+                    }
                 }
                 catch {
                     # Process object may be in an invalid state
@@ -951,9 +965,11 @@ function Start-IDAProcesses {
         $currentTime = Get-Date
         if (($currentTime - $lastStatusTime).TotalSeconds -ge $script:STATUS_UPDATE_INTERVAL_SECONDS) {
             if ($runningCount -gt 0) {
-                Write-Host "Still running: $runningCount processes..."
-                # Show brief status of longest-running processes
-                foreach ($p in $activeProcesses | Select-Object -First 3) {
+                # Calculate progress: completed = total started - still running
+                $completedCount = $totalFilesAttempted - $runningCount
+                Write-Host "[$completedCount/$totalFilesAttempted completed] Still running: $runningCount processes..."
+                # Show status of all running processes
+                foreach ($p in $activeProcesses) {
                     $info = $processInfo[$p.BaseName]
                     if ($info -and $info.StartTime) {
                         $elapsed = [math]::Round(($currentTime - $info.StartTime).TotalMinutes, 1)
