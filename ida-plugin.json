@@ -3,7 +3,7 @@
   "plugin": {
     "name": "DeepExtract",
     "entryPoint": "main.py",
-    "version": "0.0.6",
+    "version": "0.0.8",
     "idaVersions": [
       "9.0",
       "9.1",
