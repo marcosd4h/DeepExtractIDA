@@ -40,7 +40,7 @@ LOW_ADDRESS_THRESHOLD = 0x10000        # 64KB - very low addresses are suspiciou
 MIN_JUMP_TABLE_CONFIDENCE = 30.0       # Minimum confidence percentage to accept jump table detection
 
 # Loop Analysis Configuration
-DEFAULT_LOOP_BLOCK_LIMIT = 1000  # Default maximum basic blocks before skipping loop analysis
+DEFAULT_LOOP_BLOCK_LIMIT = 5000  # Default maximum basic blocks before skipping loop analysis
 LOOP_ANALYSIS_WARNING_THRESHOLD = 500  # Warn when function exceeds this block count
 
 # Batch Processing Configuration

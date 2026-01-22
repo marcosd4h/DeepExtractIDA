@@ -15,6 +15,7 @@ import ida_nalt
 import ida_ua
 import ida_idp
 import ida_lines
+import ida_xref
 import idautils
 try:
     import ida_allins
@@ -71,10 +72,55 @@ def analyze_jump_table(instruction_ea: int) -> Tuple[List[int], float, Dict[str,
             detection_info['confidence_factors'].append('ida_detected_switch')
             
             # Get all switch targets
-            for i in range(si.get_jtable_size()):
-                target_ea = si.get_jtable_element_ea(instruction_ea, i)
-                if target_ea != ida_idaapi.BADADDR:
-                    targets.append(target_ea)
+            # First try using xrefs
+            found_via_xrefs = False
+            for xref in idautils.XrefsFrom(instruction_ea):
+                if xref.type in [ida_xref.fl_JN, ida_xref.fl_JF]:
+                    if xref.to != ida_idaapi.BADADDR:
+                        targets.append(xref.to)
+                        found_via_xrefs = True
+            
+            # If no xrefs, fallback to switch_info_t methods
+            if not found_via_xrefs:
+                for i in range(si.get_jtable_size()):
+                    try:
+                        # Use get_switch_target if available (IDA 7.0+)
+                        if hasattr(ida_nalt, 'get_switch_target'):
+                            target_ea = ida_nalt.get_switch_target(instruction_ea, i)
+                        elif hasattr(si, 'get_jtable_element_ea'):
+                            target_ea = si.get_jtable_element_ea(instruction_ea, i)
+                        else:
+                            # Manual fallback with support for relative addresses (IDA 9.0 compatibility)
+                            # Handle relative addressing (SWI_RELADDR) and manual table reading
+                            element_size = si.get_jtable_element_size()
+                            element_ea = si.jumps + i * element_size
+                            
+                            if element_size == 4:
+                                val = ida_bytes.get_dword(element_ea)
+                            elif element_size == 8:
+                                val = ida_bytes.get_qword(element_ea)
+                            else:
+                                val = 0
+                                
+                            # Check flags robustly
+                            swi_reladdr = getattr(ida_nalt, 'SWI_RELADDR', 0x01)
+                            swi_signed = getattr(ida_nalt, 'SWI_SIGNED', 0x02)
+                            
+                            if si.flags & swi_signed:
+                                if element_size == 4:
+                                    val = ida_idaapi.as_signed(val, 32)
+                                elif element_size == 8:
+                                    val = ida_idaapi.as_signed(val, 64)
+                                    
+                            if si.flags & swi_reladdr:
+                                target_ea = (si.elbase + val) & 0xFFFFFFFFFFFFFFFF
+                            else:
+                                target_ea = val
+                    except Exception:
+                        target_ea = ida_idaapi.BADADDR
+                    
+                    if target_ea != ida_idaapi.BADADDR:
+                        targets.append(target_ea)
             
             if len(targets) > 0:
                 detection_info['confidence_factors'].append(f'ida_switch_targets_{len(targets)}')

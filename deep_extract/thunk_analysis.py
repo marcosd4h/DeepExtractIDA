@@ -9,6 +9,11 @@ import ida_idaapi
 import ida_ua
 import ida_idp
 
+try:
+    import ida_allins
+except ImportError:
+    import idaapi as ida_allins
+
 from . import constants
 from .logging_utils import debug_print
 
@@ -64,7 +69,7 @@ def resolve_thunk_target(thunk_ea: int, max_depth: Optional[int] = None) -> int:
         insn = ida_ua.insn_t()
         if ida_ua.decode_insn(insn, first_insn_ea):
             # Check if it's a branch instruction (JMP or CALL)
-            if ida_idp.is_indirect_jump_insn(insn) or ida_idp.is_call_insn(insn) or insn.itype == ida_idp.NN_jmp:
+            if ida_idp.is_indirect_jump_insn(insn) or ida_idp.is_call_insn(insn) or insn.itype == ida_allins.NN_jmp:
                 # Target is usually in the first operand
                 if insn.Op1.type in [ida_ua.o_near, ida_ua.o_far, ida_ua.o_mem]:
                     target = insn.Op1.addr

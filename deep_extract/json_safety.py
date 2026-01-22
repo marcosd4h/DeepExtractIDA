@@ -468,7 +468,7 @@ def create_truncation_summary(original_count: int, shown_count: int, item_type: 
     }
 
 
-def apply_field_limits(xref_list: List[Any], max_xrefs: int = 5000) -> List[Any]:
+def apply_field_limits(xref_list: List[Any], max_xrefs: int = 10000) -> List[Any]:
     """
     Applies limits to cross-reference lists to prevent unbounded growth.
     
@@ -494,7 +494,7 @@ def apply_field_limits(xref_list: List[Any], max_xrefs: int = 5000) -> List[Any]
 def safe_serialize_xrefs(xrefs: List[Dict[str, Any]], field_name: str = "xrefs") -> str:
     """Safely serialize cross-reference list."""
     # Apply xref-specific limits
-    limited_xrefs = apply_field_limits(xrefs, max_xrefs=5000)
+    limited_xrefs = apply_field_limits(xrefs, max_xrefs=10000)
     return to_json_safe(limited_xrefs, field_name=field_name)
 
 
