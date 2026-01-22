@@ -976,21 +976,67 @@ def _extract_detailed_rich_header(pe):
                             total_objects += tool_info["object_count"]
                             unique_tools.add(tool_info["product_id"])
                     
-                    rich_header_info["tools"] = tools_list
-                    rich_header_info["total_objects"] = total_objects
-                    rich_header_info["unique_tools"] = len(unique_tools)
-                    rich_header_info["valid"] = True
+                    # Only set valid=True if we successfully extracted at least one tool
+                    if tools_list:
+                        rich_header_info["tools"] = tools_list
+                        rich_header_info["total_objects"] = total_objects
+                        rich_header_info["unique_tools"] = len(unique_tools)
+                        rich_header_info["valid"] = True
+                        return rich_header_info
                 
-                return rich_header_info
+                # If we have header but no entries, fall through to manual parsing
+                # Don't return incomplete data - try method 3 instead
+                rich_header_info["errors"].append("RICH_HEADER exists but entries could not be parsed")
             except Exception as e:
                 rich_header_info["errors"].append(f"Old API failed: {str(e)}")
 
         # Method 3: Manual parsing
         try:
             manual_rich = _parse_rich_header_manually(pe)
-            if manual_rich:
-                rich_header_info.update(manual_rich)
+            if manual_rich and manual_rich.get("present"):
+                rich_header_info["present"] = True
                 rich_header_info["extraction_method"] = "manual_parsing"
+                
+                # Copy checksum if available
+                if manual_rich.get("checksum"):
+                    rich_header_info["checksum"] = manual_rich["checksum"]
+                
+                # Convert manual parsing entries to tools format
+                if manual_rich.get("entries"):
+                    tools_list = []
+                    total_objects = 0
+                    unique_tools = set()
+                    
+                    for entry in manual_rich["entries"]:
+                        product_id = entry.get("product_id", 0)
+                        build = entry.get("build", 0)
+                        count = entry.get("count", 0)
+                        
+                        tool_info = {
+                            "product_id": product_id,
+                            "build_number": build,
+                            "object_count": count,
+                            "tool_name": _get_rich_tool_name(product_id),
+                            "combined_id": (product_id << 16) | build
+                        }
+                        tools_list.append(tool_info)
+                        total_objects += count
+                        unique_tools.add(product_id)
+                    
+                    if tools_list:
+                        rich_header_info["tools"] = tools_list
+                        rich_header_info["total_objects"] = total_objects
+                        rich_header_info["unique_tools"] = len(unique_tools)
+                        rich_header_info["valid"] = True
+                
+                # Copy any errors/warnings from manual parsing
+                if manual_rich.get("errors"):
+                    rich_header_info["errors"].extend(manual_rich["errors"])
+                if manual_rich.get("warnings"):
+                    if "warnings" not in rich_header_info:
+                        rich_header_info["warnings"] = []
+                    rich_header_info["warnings"].extend(manual_rich["warnings"])
+                
                 return rich_header_info
         except Exception as e:
             rich_header_info["errors"].append(f"Manual parsing failed: {str(e)}")
@@ -998,7 +1044,16 @@ def _extract_detailed_rich_header(pe):
     except Exception as e:
         rich_header_info["errors"].append(f"General error: {str(e)}")
 
-    return rich_header_info if rich_header_info["present"] else None
+    # Return None if not present, otherwise return whatever we have
+    # with clear indication of the parsing result
+    if not rich_header_info["present"]:
+        return None
+    
+    # If present but not valid, add a note about incomplete parsing
+    if not rich_header_info["valid"]:
+        rich_header_info["errors"].append("Rich header found but tool entries could not be decoded")
+    
+    return rich_header_info
 
 
 def _get_rich_tool_name(product_id):

@@ -260,6 +260,48 @@ class CppGenerator:
             f.write("\n")
     
     
+    def generate_file_info_json(self, function_names: List[str], 
+                                db_path: str) -> int:
+        """
+        Generate file info JSON documentation.
+        
+        Creates a machine-readable JSON file with the same content as file_info.md
+        for easier parsing by scripts and automation tools.
+        
+        :param function_names: List of function names that were processed
+        :param db_path: Path to the SQLite database containing the analysis data
+        :return: Number of JSON files generated (1 for file_info.json)
+        """
+        json_files_generated = 0
+        
+        # Generate file info JSON
+        json_file_path = self.output_dir / "file_info.json"
+        
+        # Get file info from database
+        file_infos = self._get_file_info_from_db(db_path)
+        
+        if not file_infos and not function_names:
+            debug_print("WARNING - No file info entries and no processed functions found.")
+            return json_files_generated
+        
+        # extraction_tool processes exactly one file per database
+        file_info = file_infos[0] if file_infos else None
+        
+        debug_print(f"Writing {len(function_names)} function names and "
+                   f"file info to {json_file_path}")
+        
+        # Build structured dictionary
+        data_dict = self._build_file_info_dict(file_info, function_names, db_path)
+        
+        # Write JSON file
+        with open(json_file_path, 'w', encoding='utf-8') as json_file:
+            json.dump(data_dict, json_file, indent=4, ensure_ascii=False)
+        
+        debug_print(f"Successfully generated file info JSON: {json_file_path}")
+        json_files_generated += 1
+        
+        return json_files_generated
+    
     def generate_file_info_markdown(self, function_names: List[str], 
                                    db_path: str) -> int:
         """
@@ -270,7 +312,7 @@ class CppGenerator:
         
         :param function_names: List of function names that were processed
         :param db_path: Path to the SQLite database containing the analysis data
-        :return: Number of report files generated (1 for file_info.md only)
+        :return: Number of report files generated (2 for file_info.md and file_info.json)
         """
         report_files_generated = 0
         
@@ -295,9 +337,17 @@ class CppGenerator:
                          
             # Write file info sections
             self._write_file_info_section(md_file, file_info)
+            
+            # Write function list section
+            if function_names:
+                self._write_function_list_section(md_file, function_names, db_path)
         
         debug_print(f"Successfully generated file info markdown: {markdown_file_path}")
         report_files_generated += 1
+        
+        # Also generate JSON file
+        json_generated = self.generate_file_info_json(function_names, db_path)
+        report_files_generated += json_generated
         
         return report_files_generated
     
@@ -405,7 +455,10 @@ class CppGenerator:
         self._write_info_field(md_file, "Compilation Timestamp", file_info['time_date_stamp_str'] if 'time_date_stamp_str' in row_keys else None)
         self._write_info_field(md_file, "File Modified Date", file_info['file_modified_date_str'] if 'file_modified_date_str' in row_keys else None)
         self._write_info_field(md_file, "PDB Path", file_info['pdb_path'] if 'pdb_path' in row_keys else None)
-        self._write_info_field(md_file, ".NET Assembly", file_info['is_net_assembly'] if 'is_net_assembly' in row_keys else None, is_code=False)
+        # Convert .NET Assembly boolean/int to Yes/No for readability
+        is_net_raw = file_info['is_net_assembly'] if 'is_net_assembly' in row_keys else None
+        is_net_display = "Yes" if is_net_raw else "No" if is_net_raw is not None else None
+        self._write_info_field(md_file, ".NET Assembly", is_net_display, is_code=False)
         self._write_info_field(md_file, "IDA Pro DB Cache Path", file_info['idb_cache_path'] if 'idb_cache_path' in row_keys else None)
         md_file.write("\n")
 
@@ -449,6 +502,269 @@ class CppGenerator:
         is_net = file_info['is_net_assembly'] if 'is_net_assembly' in row_keys else False
         if is_net:
             self._write_json_section(md_file, "CLR Metadata (.NET)", file_info['clr_metadata'] if 'clr_metadata' in row_keys else None)
+
+    def _write_function_list_section(self, md_file, function_names: List[str], db_path: str):
+        """
+        Write the function list section to markdown.
+        
+        Groups functions by type (class methods vs standalone) and provides
+        a summary with links to generated C++ files.
+        
+        Args:
+            md_file: Open file handle to write to
+            function_names: List of function names that were processed
+            db_path: Path to the database for additional function info
+        """
+        if not function_names:
+            return
+        
+        md_file.write("\n## Function Summary\n\n")
+        md_file.write(f"**Total Functions Extracted:** {len(function_names):,}\n\n")
+        
+        # Try to get function signatures from database for richer output
+        func_details = []
+        try:
+            with sqlite3.connect(db_path, timeout=20) as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT function_name, function_signature, function_signature_extended
+                    FROM functions
+                    ORDER BY function_name
+                """)
+                func_details = cursor.fetchall()
+        except Exception as e:
+            debug_print(f"WARNING - Could not retrieve function details: {e}")
+        
+        # Categorize functions
+        class_methods = []
+        standalone_functions = []
+        
+        for row in func_details:
+            name = row['function_name'] if row else ''
+            sig = row['function_signature_extended'] or row['function_signature'] or name
+            
+            # Detect class methods by looking for :: in the name
+            if '::' in name:
+                class_name = name.split('::')[0]
+                method_name = name.split('::', 1)[1] if '::' in name else name
+                class_methods.append((class_name, method_name, sig))
+            else:
+                standalone_functions.append((name, sig))
+        
+        # Write class methods section
+        if class_methods:
+            md_file.write("### Class Methods\n\n")
+            md_file.write(f"**{len(class_methods):,} class methods** identified across ")
+            
+            # Count unique classes
+            unique_classes = set(cm[0] for cm in class_methods)
+            md_file.write(f"**{len(unique_classes):,} classes**.\n\n")
+            
+            # Group by class
+            classes_dict = {}
+            for class_name, method_name, sig in class_methods:
+                if class_name not in classes_dict:
+                    classes_dict[class_name] = []
+                classes_dict[class_name].append((method_name, sig))
+            
+            # Write collapsible sections for each class (limit to top 20 classes by method count)
+            sorted_classes = sorted(classes_dict.items(), key=lambda x: -len(x[1]))[:20]
+            for class_name, methods in sorted_classes:
+                md_file.write(f"<details>\n<summary><b>{class_name}</b> ({len(methods)} methods)</summary>\n\n")
+                md_file.write("| Method | Signature |\n")
+                md_file.write("|--------|----------|\n")
+                for method_name, sig in sorted(methods, key=lambda x: x[0])[:50]:  # Limit to 50 methods per class
+                    # Escape pipe characters in signature
+                    safe_sig = sig.replace('|', '\\|') if sig else ''
+                    # Truncate very long signatures
+                    if len(safe_sig) > 100:
+                        safe_sig = safe_sig[:97] + "..."
+                    md_file.write(f"| `{method_name}` | `{safe_sig}` |\n")
+                if len(methods) > 50:
+                    md_file.write(f"| ... | *{len(methods) - 50} more methods* |\n")
+                md_file.write("\n</details>\n\n")
+            
+            if len(classes_dict) > 20:
+                md_file.write(f"*... and {len(classes_dict) - 20} more classes*\n\n")
+        
+        # Write standalone functions section
+        if standalone_functions:
+            md_file.write("### Standalone Functions\n\n")
+            md_file.write(f"**{len(standalone_functions):,} standalone functions** identified.\n\n")
+            
+            md_file.write("<details>\n<summary>View function list</summary>\n\n")
+            md_file.write("| Function Name | Signature |\n")
+            md_file.write("|---------------|----------|\n")
+            
+            # Sort and limit output
+            for name, sig in sorted(standalone_functions, key=lambda x: x[0])[:200]:
+                safe_sig = sig.replace('|', '\\|') if sig else ''
+                if len(safe_sig) > 100:
+                    safe_sig = safe_sig[:97] + "..."
+                md_file.write(f"| `{name}` | `{safe_sig}` |\n")
+            
+            if len(standalone_functions) > 200:
+                md_file.write(f"| ... | *{len(standalone_functions) - 200} more functions* |\n")
+            
+            md_file.write("\n</details>\n\n")
+        
+        # Write generated files note
+        md_file.write("---\n\n")
+        md_file.write(f"*Generated C++ files are located in the same directory as this file.*\n")
+    
+    def _build_file_info_dict(self, file_info: Optional[sqlite3.Row], 
+                             function_names: List[str], db_path: str) -> dict:
+        """
+        Build structured dictionary for JSON export from database data.
+        
+        Parses JSON string fields into Python objects and structures the data
+        into logical sections matching the markdown format.
+        
+        Args:
+            file_info: SQLite Row containing file_info table data
+            function_names: List of function names that were processed
+            db_path: Path to the database for function details
+            
+        Returns:
+            Dictionary containing all file information structured for JSON export
+        """
+        result = {
+            "module_name": self.module_name
+        }
+        
+        if not file_info:
+            return result
+        
+        row_keys = file_info.keys()
+        
+        # Helper to safely get and parse JSON fields
+        def parse_json_field(field_name: str) -> Any:
+            if field_name not in row_keys or not file_info[field_name]:
+                return None
+            try:
+                return json.loads(file_info[field_name])
+            except (json.JSONDecodeError, TypeError):
+                return file_info[field_name]  # Return raw if parsing fails
+        
+        # Basic File Information
+        result["basic_file_info"] = {
+            "file_path": file_info['file_path'] if 'file_path' in row_keys else None,
+            "base_dir": file_info['base_dir'] if 'base_dir' in row_keys else None,
+            "file_name": file_info['file_name'] if 'file_name' in row_keys else None,
+            "extension": file_info['file_extension'] if 'file_extension' in row_keys else None,
+            "size_bytes": file_info['file_size_bytes'] if 'file_size_bytes' in row_keys else None,
+            "md5_hash": file_info['md5_hash'] if 'md5_hash' in row_keys else None,
+            "sha256_hash": file_info['sha256_hash'] if 'sha256_hash' in row_keys else None,
+            "analysis_timestamp": file_info['analysis_timestamp'] if 'analysis_timestamp' in row_keys else None
+        }
+        
+        # PE Version Information
+        result["pe_version_info"] = {
+            "file_version": file_info['file_version'] if 'file_version' in row_keys else None,
+            "product_version": file_info['product_version'] if 'product_version' in row_keys else None,
+            "company_name": file_info['company_name'] if 'company_name' in row_keys else None,
+            "product_name": file_info['product_name'] if 'product_name' in row_keys else None,
+            "file_description": file_info['file_description'] if 'file_description' in row_keys else None,
+            "internal_name": file_info['internal_name'] if 'internal_name' in row_keys else None,
+            "original_filename": file_info['original_filename'] if 'original_filename' in row_keys else None,
+            "legal_copyright": file_info['legal_copyright'] if 'legal_copyright' in row_keys else None
+        }
+        
+        # Key PE Metadata
+        is_net_raw = file_info['is_net_assembly'] if 'is_net_assembly' in row_keys else None
+        result["pe_metadata"] = {
+            "compilation_timestamp": file_info['time_date_stamp_str'] if 'time_date_stamp_str' in row_keys else None,
+            "file_modified_date": file_info['file_modified_date_str'] if 'file_modified_date_str' in row_keys else None,
+            "pdb_path": file_info['pdb_path'] if 'pdb_path' in row_keys else None,
+            "is_net_assembly": bool(is_net_raw) if is_net_raw is not None else None,
+            "idb_cache_path": file_info['idb_cache_path'] if 'idb_cache_path' in row_keys else None
+        }
+        
+        # Parse JSON sections
+        result["entry_points"] = parse_json_field('entry_point')
+        
+        # Handle imports (check both 'imports' and 'combined_imports')
+        imports_data = None
+        if 'imports' in row_keys and file_info['imports']:
+            imports_data = parse_json_field('imports')
+        elif 'combined_imports' in row_keys and file_info['combined_imports']:
+            imports_data = parse_json_field('combined_imports')
+        result["imports"] = imports_data
+        
+        result["exports"] = parse_json_field('exports')
+        result["sections"] = parse_json_field('sections')
+        result["security_features"] = parse_json_field('security_features')
+        result["dll_characteristics"] = parse_json_field('dll_characteristics')
+        result["rich_header"] = parse_json_field('rich_header')
+        result["tls_callbacks"] = parse_json_field('tls_callbacks')
+        result["load_config"] = parse_json_field('load_config')
+        result["exception_info"] = parse_json_field('exception_info')
+        
+        # CLR Metadata only if .NET assembly
+        is_net = file_info['is_net_assembly'] if 'is_net_assembly' in row_keys else False
+        if is_net:
+            result["clr_metadata"] = parse_json_field('clr_metadata')
+        else:
+            result["clr_metadata"] = None
+        
+        # Function Summary
+        if function_names:
+            func_summary = {
+                "total_functions": len(function_names),
+                "class_methods": [],
+                "standalone_functions": []
+            }
+            
+            # Get function details from database
+            try:
+                with sqlite3.connect(db_path, timeout=20) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT function_name, function_signature, function_signature_extended
+                        FROM functions
+                        ORDER BY function_name
+                    """)
+                    func_details = cursor.fetchall()
+                    
+                    # Categorize functions
+                    classes_dict = {}
+                    for row in func_details:
+                        name = row['function_name'] if row else ''
+                        sig = row['function_signature_extended'] or row['function_signature'] or name
+                        
+                        if '::' in name:
+                            class_name = name.split('::')[0]
+                            method_name = name.split('::', 1)[1]
+                            if class_name not in classes_dict:
+                                classes_dict[class_name] = []
+                            classes_dict[class_name].append({
+                                "name": method_name,
+                                "signature": sig
+                            })
+                        else:
+                            func_summary["standalone_functions"].append({
+                                "name": name,
+                                "signature": sig
+                            })
+                    
+                    # Convert classes_dict to list format
+                    for class_name, methods in sorted(classes_dict.items()):
+                        func_summary["class_methods"].append({
+                            "class_name": class_name,
+                            "method_count": len(methods),
+                            "methods": methods
+                        })
+                    
+            except Exception as e:
+                debug_print(f"WARNING - Could not retrieve function details for JSON: {e}")
+            
+            result["function_summary"] = func_summary
+        else:
+            result["function_summary"] = None
+        
+        return result
 
 
 def generate_standalone_markdown_documentation(db_path: str, output_dir: str, module_name: str = None) -> bool:
@@ -502,12 +818,12 @@ def generate_standalone_markdown_documentation(db_path: str, output_dir: str, mo
             function_names = [func['function_name'] for func in functions_data if func['function_name']]
             
             if function_names:
-                # Generate markdown documentation
+                # Generate markdown and JSON documentation
                 report_files_generated = generator.generate_file_info_markdown(function_names, db_path)
                 
                 debug_print(f"Successfully generated {report_files_generated} documentation files for {len(function_names)} functions")
                 debug_print(f"Output directory: {output_path}")
-                debug_print(f"Generated files: file_info.md")
+                debug_print(f"Generated files: file_info.md, file_info.json")
                 
                 return True
             else:

@@ -202,7 +202,6 @@ class DeepExtractModule(ida_idaapi.plugmod_t):
                 debug_print(f"Set min validation confidence to: {config.min_conf}")
             
             # Run the analysis pipeline
-            debug_print("Starting analysis pipeline...")
             return_code = run_analysis_pipeline(config)
             
             if return_code == 0:
@@ -299,7 +298,6 @@ class DeepExtractModule(ida_idaapi.plugmod_t):
             
             try:
                 # Run the analysis pipeline
-                debug_print("Starting analysis pipeline...")
                 return_code = run_analysis_pipeline(config)
                 
                 if return_code == 0:

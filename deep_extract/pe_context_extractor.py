@@ -66,6 +66,175 @@ _DEFAULT_SQLITE_PRAGMAS = {
 }
 
 
+# =============================================================================
+# Pipeline Timing and Progress Tracking
+# =============================================================================
+
+def _format_duration(seconds: float) -> str:
+    """Format a duration in seconds to a human-readable string.
+    
+    Examples:
+        _format_duration(65.5) -> "1m 5s"
+        _format_duration(3725) -> "1h 2m 5s"
+        _format_duration(0.5) -> "0.5s"
+    """
+    if seconds < 60:
+        return f"{seconds:.1f}s" if seconds < 10 else f"{int(seconds)}s"
+    
+    minutes, secs = divmod(int(seconds), 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes}m {secs}s"
+
+
+class PipelineTimer:
+    """Tracks timing for analysis pipeline phases.
+    
+    Usage:
+        timer = PipelineTimer()
+        timer.start_phase("import_extraction")
+        # ... do work ...
+        timer.end_phase("import_extraction")
+        timer.print_summary("myfile.dll", functions_count=1234)
+    """
+    
+    def __init__(self):
+        self.phase_start_times: Dict[str, float] = {}
+        self.phase_durations: Dict[str, float] = {}
+        self.overall_start_time: float = time.time()
+        self.functions_processed: int = 0
+        self.cpp_files_generated: int = 0
+    
+    def start_phase(self, phase_name: str) -> None:
+        """Start timing a phase."""
+        self.phase_start_times[phase_name] = time.time()
+    
+    def end_phase(self, phase_name: str, log_message: Optional[str] = None) -> float:
+        """End timing a phase and optionally log a message.
+        
+        Returns:
+            Duration of the phase in seconds.
+        """
+        if phase_name not in self.phase_start_times:
+            return 0.0
+        
+        duration = time.time() - self.phase_start_times[phase_name]
+        self.phase_durations[phase_name] = duration
+        
+        if log_message:
+            debug_print(f"[PHASE] {log_message} ({_format_duration(duration)})")
+        
+        return duration
+    
+    def get_phase_duration(self, phase_name: str) -> float:
+        """Get the duration of a completed phase."""
+        return self.phase_durations.get(phase_name, 0.0)
+    
+    def get_total_duration(self) -> float:
+        """Get total elapsed time since timer creation."""
+        return time.time() - self.overall_start_time
+    
+    def print_summary(self, file_name: str) -> None:
+        """Print a comprehensive timing summary."""
+        total_duration = self.get_total_duration()
+        
+        debug_print("=" * 80)
+        debug_print(f"Analysis Summary for {file_name}")
+        debug_print("=" * 80)
+        
+        # Phase breakdown
+        if self.phase_durations:
+            debug_print("Phase Timing Breakdown:")
+            for phase_name, duration in self.phase_durations.items():
+                percentage = (duration / total_duration * 100) if total_duration > 0 else 0
+                formatted_name = phase_name.replace("_", " ").title()
+                debug_print(f"  {formatted_name:30s} {_format_duration(duration):>10s} ({percentage:5.1f}%)")
+        
+        debug_print("-" * 80)
+        debug_print(f"  {'Total Duration':30s} {_format_duration(total_duration):>10s}")
+        
+        # Function statistics
+        if self.functions_processed > 0:
+            debug_print("")
+            debug_print("Processing Statistics:")
+            debug_print(f"  Functions processed:     {self.functions_processed:,}")
+            
+            # Calculate throughput from function extraction phase
+            func_extraction_time = self.phase_durations.get("function_extraction", total_duration)
+            if func_extraction_time > 0:
+                throughput = self.functions_processed / func_extraction_time
+                debug_print(f"  Throughput:              {throughput:.1f} functions/sec")
+            
+            if self.cpp_files_generated > 0:
+                debug_print(f"  C++ files generated:     {self.cpp_files_generated:,}")
+        
+        debug_print("=" * 80)
+
+
+class ProgressTracker:
+    """Tracks progress for batch processing with ETA calculation."""
+    
+    def __init__(self, total_items: int, phase_name: str = "Processing"):
+        self.total_items = total_items
+        self.phase_name = phase_name
+        self.processed_items = 0
+        self.start_time = time.time()
+        self.last_report_time = 0.0
+        self.report_interval = 5.0  # Minimum seconds between progress reports
+    
+    def update(self, items_processed: int) -> None:
+        """Update the count of processed items."""
+        self.processed_items = items_processed
+    
+    def increment(self, count: int = 1) -> None:
+        """Increment the processed count."""
+        self.processed_items += count
+    
+    def get_progress_string(self) -> str:
+        """Get a progress string with percentage and ETA.
+        
+        Returns:
+            String like "1,234/5,678 (21.7%) - ETA: 12m 34s"
+        """
+        if self.total_items == 0:
+            return "0/0 (0%)"
+        
+        percentage = (self.processed_items / self.total_items) * 100
+        elapsed = time.time() - self.start_time
+        
+        # Calculate ETA
+        eta_str = ""
+        if self.processed_items > 0 and elapsed > 0:
+            rate = self.processed_items / elapsed
+            remaining_items = self.total_items - self.processed_items
+            if rate > 0:
+                eta_seconds = remaining_items / rate
+                eta_str = f" - ETA: {_format_duration(eta_seconds)}"
+        
+        return f"{self.processed_items:,}/{self.total_items:,} ({percentage:.1f}%){eta_str}"
+    
+    def should_report(self) -> bool:
+        """Check if enough time has passed to report progress."""
+        current_time = time.time()
+        if current_time - self.last_report_time >= self.report_interval:
+            self.last_report_time = current_time
+            return True
+        return False
+    
+    def log_progress(self, batch_num: Optional[int] = None) -> None:
+        """Log the current progress if enough time has passed."""
+        if not self.should_report():
+            return
+        
+        progress_str = self.get_progress_string()
+        if batch_num is not None:
+            debug_print(f"Committed batch {batch_num}. Progress: {progress_str}")
+        else:
+            debug_print(f"Progress: {progress_str}")
+
+
 def _normalize_sqlite_pragmas(pragmas: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Normalize and sanitize PRAGMA values to a safe subset."""
     merged = dict(_DEFAULT_SQLITE_PRAGMAS)
@@ -943,6 +1112,12 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         else:
             BATCH_SIZE = constants.BATCH_SIZE_LARGE_BINARY
         
+        # Initialize progress tracker
+        debug_print(f"Queued {num_functions:,} functions for extraction")
+        progress = ProgressTracker(num_functions, "Function extraction")
+        total_batches = (num_functions + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
+        current_batch = 0
+        
         with get_db_connection(sqlite_db_path, pragmas=db_pragmas) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
@@ -1051,7 +1226,9 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                     cursor.execute('BEGIN IMMEDIATE')
                     _profile_add_stage(profile, "db_commit", time.perf_counter() - commit_start)
                     batch_count = 0
-                    debug_print(f"Committed batch. Total: {functions_processed_count}")
+                    current_batch += 1
+                    progress.update(functions_processed_count)
+                    progress.log_progress(batch_num=current_batch)
             
             final_commit_start = time.perf_counter()
             cursor.execute('COMMIT')
@@ -1257,6 +1434,10 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
     """Orchestrates the complete PE analysis workflow."""
     debug_print("Starting analysis pipeline...")
     
+    # Initialize pipeline timer for phase tracking
+    timer = PipelineTimer()
+    file_name = config.input_file_path.name if config.input_file_path else "unknown"
+    
     # Dependency/capability check (do not hard-fail; degrade gracefully where possible).
     caps = check_dependencies()
     for w in caps.get("warnings", []):
@@ -1271,7 +1452,10 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         if not handle_database_setup(config):
             return 0
         
+        # Track IDA auto-analysis time
+        timer.start_phase("ida_auto_analysis")
         ida_auto.auto_wait()
+        timer.end_phase("ida_auto_analysis", f"IDA auto-analysis complete")
         
         idb_cache_path_abs = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
         storage_dir = config.sqlite_db_path.parent
@@ -1328,6 +1512,7 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
                         debug_print(f"WARNING - Failed to close PE object: {e}")
             
         # Imports/Exports
+        timer.start_phase("import_export_extraction")
         raw_imports_list = extractor_core.extract_imports()
         exports_list = extractor_core.extract_exports()
         imports_list = combine_imports(raw_imports_list, runtime_info.get('delay_load_imports', []))
@@ -1337,23 +1522,44 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         
         entry_points = extractor_core.extract_all_entry_points_with_methods()
         entry_points_json = json_safety.to_json_safe(entry_points, max_list_items=100, field_name="entry_points")
+        timer.end_phase("import_export_extraction", f"Import/export extraction complete")
         
         # Function Extraction
+        timer.start_phase("function_extraction")
         analysis_args = config.get_analysis_args_dict()
-        if not extract_all_functions(
+        functions_result = extract_all_functions(
             str(config.sqlite_db_path), file_hashes, imports_json, exports_json,
             entry_points_json, version_info, pe_metadata, advanced_pe_info, runtime_info,
             file_modified_date_str, idb_cache_path, has_decompiler,
             db_pragmas=config.get_sqlite_pragmas(),
             **analysis_args
-        ):
+        )
+        
+        # Get function count from database for summary
+        try:
+            with get_db_connection(str(config.sqlite_db_path), pragmas=config.get_sqlite_pragmas()) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM functions")
+                timer.functions_processed = cursor.fetchone()[0]
+        except Exception:
+            pass
+        
+        timer.end_phase("function_extraction", f"Function extraction complete ({timer.functions_processed:,} functions)")
+        
+        if not functions_result:
+            timer.print_summary(file_name)
             return 1
             
         # Output Generation
         if config.generate_cpp:
-            generate_output_files(config, str(config.sqlite_db_path))
+            timer.start_phase("cpp_generation")
+            cpp_result = generate_output_files(config, str(config.sqlite_db_path))
+            if cpp_result:
+                timer.cpp_files_generated = cpp_result[0]  # cpp_files_generated count
+            timer.end_phase("cpp_generation", f"C++ generation complete ({timer.cpp_files_generated:,} files)")
             
         # DB Update
+        timer.start_phase("database_finalization")
         pe_data = {
             'version_info': version_info,
             'pe_metadata': pe_metadata,
@@ -1367,7 +1573,14 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         }
         
         if not handle_database_updates(config, pe_data):
+            timer.end_phase("database_finalization")
+            timer.print_summary(file_name)
             return 1
+        
+        timer.end_phase("database_finalization")
+        
+        # Print final summary
+        timer.print_summary(file_name)
             
         return 0
         
