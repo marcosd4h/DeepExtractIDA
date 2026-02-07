@@ -1374,7 +1374,8 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT function_name, function_signature, decompiled_code
+                SELECT function_name, function_signature, function_signature_extended,
+                       mangled_name, decompiled_code
                 FROM functions
                 WHERE decompiled_code IS NOT NULL 
                 AND decompiled_code != 'Decompiler not available'

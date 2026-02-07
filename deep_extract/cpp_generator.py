@@ -40,8 +40,12 @@ class CppGenerator:
         
         # Process and categorize functions
         for func_row in processed_funcs:
+            row_keys = func_row.keys()
             original_name = func_row['function_name']
             original_signature = func_row['function_signature']
+            signature_extended = (func_row['function_signature_extended']
+                                 if 'function_signature_extended' in row_keys else None)
+            mangled_name = func_row['mangled_name'] if 'mangled_name' in row_keys else None
             decompiled_code = func_row['decompiled_code']  # This is our C++ source
             
             if not original_name or not original_signature or not decompiled_code:
@@ -67,11 +71,13 @@ class CppGenerator:
                 class_name = match.group(1)
                 method_name = match.group(2)
                 class_methods_data.append(
-                    (class_name, method_name, original_signature, actual_cpp_code)
+                    (class_name, method_name, original_name, original_signature,
+                     signature_extended, mangled_name, actual_cpp_code)
                 )
             else:
                 standalone_functions_data.append(
-                    (original_name, original_signature, actual_cpp_code)
+                    (original_name, original_signature, signature_extended,
+                     mangled_name, actual_cpp_code)
                 )
         
         debug_print(f"Identified {len(class_methods_data)} class methods and "
@@ -141,7 +147,10 @@ class CppGenerator:
         
         debug_print(f"Generating C++ files for {len(class_methods_data)} class methods...")
         
-        for class_name, method_name, signature, cpp_code_str in sorted(class_methods_data):
+        for class_name, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str in sorted(
+            class_methods_data,
+            key=lambda item: (item[0], item[1], item[2])
+        ):
             sanitized_class_name = self.sanitize_filename(class_name)
             sanitized_method_name = self.sanitize_filename(method_name)
             
@@ -158,7 +167,14 @@ class CppGenerator:
             
             # Write C++ file
             debug_print(f"TRACE - Writing class method '{class_name}::{method_name}' to {class_method_path}")
-            self._write_cpp_file(class_method_path, signature, cpp_code_str)
+            self._write_cpp_file(
+                class_method_path,
+                signature,
+                cpp_code_str,
+                function_name=original_name,
+                mangled_name=mangled_name,
+                signature_extended=signature_extended
+            )
             cpp_files_generated += 1
         
         debug_print("Generated C++ files for class methods.")
@@ -177,7 +193,7 @@ class CppGenerator:
         
         sorted_standalone = sorted(standalone_functions_data, key=lambda item: (item[0], item[1]))
         
-        for original_name, signature, cpp_code_str in sorted_standalone:
+        for original_name, signature, signature_extended, mangled_name, cpp_code_str in sorted_standalone:
             sanitized_func_name = self.sanitize_filename(original_name)
             if not sanitized_func_name:
                 sanitized_func_name = "unnamed_standalone_function"
@@ -195,17 +211,34 @@ class CppGenerator:
             
             # Write C++ file
             debug_print(f"TRACE - Writing standalone function '{original_name}' to {standalone_file_path}")
-            self._write_cpp_file(standalone_file_path, signature, cpp_code_str)
+            self._write_cpp_file(
+                standalone_file_path,
+                signature,
+                cpp_code_str,
+                function_name=original_name,
+                mangled_name=mangled_name,
+                signature_extended=signature_extended
+            )
             cpp_files_generated += 1
         
         debug_print("Generated C++ files for standalone functions.")
         return cpp_files_generated
     
     def _write_cpp_file(self, file_path: pathlib.Path, signature: str, 
-                       cpp_code: str):
+                       cpp_code: str, function_name: Optional[str] = None,
+                       mangled_name: Optional[str] = None,
+                       signature_extended: Optional[str] = None):
         """Write a C++ source file."""
         with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(f"// Function Signature: {signature}\n\n")
+            header_lines = []
+            if function_name:
+                header_lines.append(f"// Function Name: {function_name}")
+            if mangled_name:
+                header_lines.append(f"// Mangled Name: {mangled_name}")
+            if signature_extended and signature_extended != signature:
+                header_lines.append(f"// Function Signature (Extended): {signature_extended}")
+            header_lines.append(f"// Function Signature: {signature}")
+            f.write("\n".join(header_lines) + "\n\n")
             
             # Process and write the C++ code
             processed_cpp = cpp_code.replace("\\n", "\n").replace("`", "'").strip()

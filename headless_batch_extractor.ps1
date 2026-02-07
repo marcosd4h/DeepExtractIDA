@@ -31,6 +31,18 @@
 .PARAMETER Help
     Display detailed help information with usage examples.
 
+.PARAMETER NoDownloadSymbols
+    Skip automatic symbol (PDB) downloading before analysis. Symbols are downloaded by default.
+
+.PARAMETER SymbolStorePath
+    Local symbol store directory where PDB files are cached (default: C:\symbols).
+
+.PARAMETER SymchkPath
+    Path to symchk.exe from the Windows SDK Debugging Tools. Auto-detected if not specified.
+
+.PARAMETER SymbolServerUrl
+    Symbol server URL to download PDBs from (default: https://msdl.microsoft.com/download/symbols).
+
 .EXAMPLE
     .\headless_batch_extractor.ps1 -ExtractDir "C:\Windows\System32" -StorageDir "C:\Analysis" -Recursive
 
@@ -97,7 +109,7 @@ param(
     [Alias('h', '?')]
     [switch]$Help,
 
-    # --- Analysis Feature Flags ---
+    # Analysis Feature Flags
     [Parameter(HelpMessage = "Skip extraction of dangerous API calls")] [switch]$NoExtractDangerousApis,
     [Parameter(HelpMessage = "Skip string extraction")] [switch]$NoExtractStrings,
     [Parameter(HelpMessage = "Skip stack frame analysis")] [switch]$NoExtractStackFrame,
@@ -108,7 +120,28 @@ param(
     [Parameter(HelpMessage = "Skip advanced PE analysis")] [switch]$NoAdvancedPe,
     [Parameter(HelpMessage = "Skip runtime information extraction")] [switch]$NoRuntimeInfo,
     [Parameter(HelpMessage = "Force re-analysis of previously analyzed files")] [switch]$ForceReanalyze,
-    [Parameter(HelpMessage = "Skip C++ file generation from decompiled code")] [switch]$NoGenerateCpp
+    [Parameter(HelpMessage = "Skip C++ file generation from decompiled code")] [switch]$NoGenerateCpp,
+
+    # Symbol Download Options
+    [Parameter(HelpMessage = "Skip automatic symbol (PDB) downloading before analysis (enabled by default)")]
+    [switch]$NoDownloadSymbols,
+
+    [Parameter(HelpMessage = "Local symbol store directory (default: C:\symbols)")]
+    [ValidateNotNullOrEmpty()]
+    [string]$SymbolStorePath = "C:\symbols",
+
+    [Parameter(HelpMessage = "Path to symchk.exe. Auto-detected from Windows SDK if not specified.")]
+    [ValidateScript({ 
+            if ($_ -and -not (Test-Path $_ -PathType Leaf)) {
+                throw "symchk.exe not found at '$_'."
+            }
+            return $true
+        })]
+    [string]$SymchkPath,
+
+    [Parameter(HelpMessage = "Symbol server URL (default: Microsoft public symbol server)")]
+    [ValidateNotNullOrEmpty()]
+    [string]$SymbolServerUrl = "https://msdl.microsoft.com/download/symbols"
 )
 
 # Show-Help function
@@ -157,9 +190,21 @@ function Show-Help {
     Write-Host "  -ForceReanalyze         Force re-analysis of all files"
     Write-Host "  -NoGenerateCpp          Skip C++ code generation"
     Write-Host ""
+    Write-Host "SYMBOL DOWNLOAD OPTIONS:" -ForegroundColor Yellow
+    Write-Host "  Symbols (PDBs) are automatically downloaded before analysis using symchk.exe."
+    Write-Host "  This enables IDA Pro to produce richer analysis with proper function names."
+    Write-Host ""
+    Write-Host "  -NoDownloadSymbols      Skip automatic symbol downloading (enabled by default)"
+    Write-Host "  -SymbolStorePath <path>  Local symbol cache directory (default: C:\symbols)"
+    Write-Host "  -SymchkPath <path>      Path to symchk.exe (auto-detected from Windows SDK)"
+    Write-Host "  -SymbolServerUrl <url>   Symbol server URL (default: Microsoft public server)"
+    Write-Host ""
+    Write-Host "  Sets _NT_SYMBOL_PATH environment variable at user level (no admin required)."
+    Write-Host "  Requires symchk.exe from Windows SDK Debugging Tools."
+    Write-Host ""
     Write-Host "EXAMPLES:" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  # Analyze all PE files in System32 (recursive)" -ForegroundColor Gray
+    Write-Host "  # Analyze all PE files in System32 (recursive, symbols auto-downloaded)" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Windows\System32' -StorageDir 'C:\Analysis' -Recursive"
     Write-Host ""
     Write-Host "  # Analyze files from a list" -ForegroundColor Gray
@@ -167,6 +212,12 @@ function Show-Help {
     Write-Host ""
     Write-Host "  # Extract modules from a running process (PID 1234)" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -TargetPid 1234 -StorageDir 'C:\Analysis'"
+    Write-Host ""
+    Write-Host "  # Skip symbol downloading (faster startup, less accurate analysis)" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -NoDownloadSymbols"
+    Write-Host ""
+    Write-Host "  # Use a custom symbol store path" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -SymbolStorePath 'D:\MySymbols'"
     Write-Host ""
     Write-Host "  # Skip string extraction to reduce analysis time" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -NoExtractStrings"
@@ -319,6 +370,229 @@ function Find-LatestIDA {
     }
     
     return $null
+}
+
+# Auto-detect symchk.exe from Windows SDK Debugging Tools
+function Find-Symchk {
+    # Strategy 1: Check PATH environment variable first
+    $symchkInPath = Get-Command -Name "symchk.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($symchkInPath) {
+        Write-Host "Found symchk.exe in PATH: $($symchkInPath.Source)" -ForegroundColor Gray
+        return $symchkInPath.Source
+    }
+    
+    # Strategy 2: Search common Windows SDK Debugger installation directories
+    # Prefer x64 over x86
+    $searchPaths = @(
+        "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\symchk.exe",
+        "C:\Program Files (x86)\Windows Kits\10\Debuggers\x86\symchk.exe",
+        "C:\Program Files\Windows Kits\10\Debuggers\x64\symchk.exe",
+        "C:\Program Files\Windows Kits\10\Debuggers\x86\symchk.exe"
+    )
+    
+    foreach ($path in $searchPaths) {
+        if (Test-Path $path -PathType Leaf) {
+            Write-Host "Found symchk.exe: $path" -ForegroundColor Gray
+            return $path
+        }
+    }
+    
+    return $null
+}
+
+# Set _NT_SYMBOL_PATH environment variable (user-level, no admin required)
+function Set-SymbolPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SymbolStorePath,
+        [Parameter(Mandatory = $true)]
+        [string]$SymbolServerUrl
+    )
+    
+    $symbolPathValue = "srv*$SymbolStorePath*$SymbolServerUrl"
+    
+    # Check if already set to the same value
+    $currentValue = [System.Environment]::GetEnvironmentVariable('_NT_SYMBOL_PATH', 'User')
+    if ($currentValue -eq $symbolPathValue) {
+        Write-Host "_NT_SYMBOL_PATH already set (user-level): $symbolPathValue" -ForegroundColor Gray
+    }
+    else {
+        # Set persistent user-level environment variable (no admin required)
+        try {
+            [System.Environment]::SetEnvironmentVariable('_NT_SYMBOL_PATH', $symbolPathValue, 'User')
+            Write-Host "Set _NT_SYMBOL_PATH (user-level): $symbolPathValue" -ForegroundColor Green
+        }
+        catch {
+            Write-Warning "Could not set persistent _NT_SYMBOL_PATH: $($_.Exception.Message)"
+            Write-Warning "The variable will only be set for the current session."
+        }
+    }
+    
+    # Always set in current process so IDA picks it up immediately
+    $env:_NT_SYMBOL_PATH = $symbolPathValue
+    Write-Host "_NT_SYMBOL_PATH set for current process." -ForegroundColor Gray
+}
+
+# Download symbols for a list of files using symchk.exe
+# Groups files by (ParentDirectory, Extension) and runs one symchk per group in parallel
+function Start-SymbolDownload {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.IO.FileInfo[]]$Files,
+        [Parameter(Mandatory = $true)]
+        [string]$SymchkExePath,
+        [Parameter(Mandatory = $true)]
+        [string]$SymbolStorePath,
+        [Parameter(Mandatory = $true)]
+        [string]$SymbolServerUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$LogsDir
+    )
+    
+    if ($Files.Count -eq 0) {
+        Write-Host "No files to download symbols for." -ForegroundColor Yellow
+        return
+    }
+    
+    # Ensure the symbol store directory exists
+    if (-not (Test-Path $SymbolStorePath)) {
+        try {
+            New-Item -ItemType Directory -Path $SymbolStorePath -Force -ErrorAction Stop | Out-Null
+            Write-Host "Created symbol store directory: $SymbolStorePath"
+        }
+        catch {
+            Write-Error "Failed to create symbol store directory '$SymbolStorePath': $($_.Exception.Message)"
+            return
+        }
+    }
+    
+    # Group files by (ParentDirectory, Extension) for efficient batching
+    $groups = @{}
+    foreach ($file in $Files) {
+        $dir = $file.DirectoryName
+        $ext = $file.Extension.ToLower()  # e.g. ".dll", ".exe", ".sys"
+        $key = "$dir|$ext"
+        if (-not $groups.ContainsKey($key)) {
+            $groups[$key] = @{
+                Directory = $dir
+                Extension = $ext
+                Count     = 0
+            }
+        }
+        $groups[$key].Count++
+    }
+    
+    $symbolServerArg = "srv*$SymbolStorePath*$SymbolServerUrl"
+    $totalGroups = $groups.Count
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    
+    Write-Host ""
+    Write-Host "=== Symbol Download ===" -ForegroundColor Cyan
+    Write-Host "Downloading symbols for $($Files.Count) files across $totalGroups directory/extension groups"
+    Write-Host "Symbol store: $SymbolStorePath"
+    Write-Host "Symbol server: $SymbolServerUrl"
+    Write-Host ""
+    
+    # Launch all symchk processes in parallel
+    $symchkProcesses = [System.Collections.Generic.List[hashtable]]::new()
+    
+    foreach ($entry in $groups.GetEnumerator()) {
+        $group = $entry.Value
+        $dir = $group.Directory
+        $ext = $group.Extension      # e.g. ".dll"
+        $wildcard = "*$ext"           # e.g. "*.dll"
+        $targetPath = Join-Path $dir $wildcard
+        
+        # Create a sanitized directory name for the log file
+        $sanitizedDir = $dir -replace '[\\/:*?"<>|]', '_'
+        $sanitizedDir = $sanitizedDir.Trim('_')
+        # Truncate to avoid overly long filenames
+        if ($sanitizedDir.Length -gt 80) {
+            $sanitizedDir = $sanitizedDir.Substring(0, 80)
+        }
+        $extClean = $ext.TrimStart('.')
+        $logFile = Join-Path $LogsDir "symchk_${sanitizedDir}_${extClean}_${timestamp}.log"
+        
+        $symchkArgs = @('/v', '/s', $symbolServerArg, $targetPath)
+        
+        Write-Host "  Starting symchk: $dir\$wildcard ($($group.Count) files)" -ForegroundColor Gray
+        
+        try {
+            $process = Start-Process -FilePath $SymchkExePath -ArgumentList $symchkArgs `
+                -PassThru -WindowStyle Hidden `
+                -RedirectStandardOutput $logFile `
+                -RedirectStandardError "$logFile.err"
+            
+            $symchkProcesses.Add(@{
+                    Process   = $process
+                    Directory = $dir
+                    Extension = $ext
+                    LogFile   = $logFile
+                    FileCount = $group.Count
+                })
+        }
+        catch {
+            Write-Warning "Failed to start symchk for '$targetPath': $($_.Exception.Message)"
+        }
+    }
+    
+    if ($symchkProcesses.Count -eq 0) {
+        Write-Warning "No symchk processes were started."
+        return
+    }
+    
+    # Wait for all symchk processes to complete
+    Write-Host ""
+    Write-Host "Waiting for $($symchkProcesses.Count) symchk process(es) to complete..."
+    
+    $downloadStartTime = Get-Date
+    foreach ($entry in $symchkProcesses) {
+        try {
+            $entry.Process.WaitForExit()
+        }
+        catch {
+            Write-Warning "Error waiting for symchk process: $($_.Exception.Message)"
+        }
+    }
+    $downloadDuration = (Get-Date) - $downloadStartTime
+    
+    # Report results
+    $succeeded = 0
+    $failed = 0
+    foreach ($entry in $symchkProcesses) {
+        $exitCode = -1
+        try {
+            $exitCode = $entry.Process.ExitCode
+        }
+        catch { }
+        
+        if ($exitCode -eq 0) {
+            $succeeded++
+            Write-Host "  Completed: $($entry.Directory)\*$($entry.Extension) ($($entry.FileCount) files)" -ForegroundColor Green
+        }
+        else {
+            # symchk returns non-zero if some symbols are missing, which is common and not fatal
+            $failed++
+            Write-Host "  Partial/failed: $($entry.Directory)\*$($entry.Extension) (exit code: $exitCode, log: $($entry.LogFile))" -ForegroundColor Yellow
+        }
+        
+        # Dispose process object
+        try { $entry.Process.Dispose() } catch { }
+        
+        # Clean up empty error log files
+        $errLog = "$($entry.LogFile).err"
+        if ((Test-Path $errLog) -and (Get-Item $errLog).Length -eq 0) {
+            Remove-Item $errLog -ErrorAction SilentlyContinue
+        }
+    }
+    
+    $durationStr = "{0:N1}" -f $downloadDuration.TotalMinutes
+    Write-Host ""
+    Write-Host "Symbol download completed in $durationStr minutes. Groups: $succeeded succeeded, $failed had missing symbols." -ForegroundColor Cyan
+    if ($failed -gt 0) {
+        Write-Host "Note: Partial failures are normal - not all PE files have public symbols available." -ForegroundColor Yellow
+    }
+    Write-Host ""
 }
 
 # Determine IDA path: use provided path or auto-detect
@@ -689,13 +963,15 @@ function Update-CompletedProcessInfo {
                     $fileName = [System.IO.Path]::GetFileName($info.FileName)
                     $durationStr = if ($info.DurationMinutes) { 
                         "{0:N1} minutes" -f $info.DurationMinutes 
-                    } else { 
+                    }
+                    else { 
                         "unknown duration" 
                     }
                     
                     if ($p.ExitCode -eq 0) {
                         Write-Host "Completed: $fileName (PID $($p.Id)) in $durationStr - Exit code: 0" -ForegroundColor Green
-                    } else {
+                    }
+                    else {
                         Write-Host "Completed: $fileName (PID $($p.Id)) in $durationStr - Exit code: $($p.ExitCode)" -ForegroundColor Yellow
                     }
                 }
@@ -873,7 +1149,7 @@ function Start-IDAProcesses {
             # Use explicit string concatenation for clarity with paths that may contain spaces
             $processArgs.Add('-o"' + $idbPath + '"')
             
-            # --- Construct analysis flags for the IDA script ---
+            # Construct analysis flags for the IDA script
             # IDA's -S argument passes the script path and args to the script interpreter.
             # Use backslash-escaped quotes (\") for paths inside -S that need to survive
             # through IDA's parsing to reach Python's argparse.
@@ -1308,6 +1584,33 @@ if (-not (Test-Path $checkerScriptPath -PathType Leaf)) {
 }
 Write-Host "Found file checker script: $checkerScriptPath" -ForegroundColor Green
 
+# Pre-flight check: Verify symchk.exe if symbol downloading is enabled
+$script:downloadSymbolsEnabled = -not $NoDownloadSymbols.IsPresent
+$script:SYMCHK_PATH = $null
+
+if ($script:downloadSymbolsEnabled) {
+    if ($SymchkPath) {
+        $script:SYMCHK_PATH = $SymchkPath
+        Write-Host "Using specified symchk.exe: $($script:SYMCHK_PATH)" -ForegroundColor Green
+    }
+    else {
+        $script:SYMCHK_PATH = Find-Symchk
+        if (-not $script:SYMCHK_PATH) {
+            Write-Warning "Could not find symchk.exe. Symbol downloading will be skipped."
+            Write-Warning "To enable symbol downloading, install Windows SDK Debugging Tools or specify -SymchkPath."
+            Write-Warning "  Download from: https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/"
+            Write-Warning "  Or specify:    -SymchkPath 'C:\path\to\symchk.exe'"
+            $script:downloadSymbolsEnabled = $false
+        }
+        else {
+            Write-Host "Auto-detected symchk.exe: $($script:SYMCHK_PATH)" -ForegroundColor Green
+        }
+    }
+}
+else {
+    Write-Host "Symbol downloading disabled (-NoDownloadSymbols)." -ForegroundColor Gray
+}
+
 # Ensure required directories exist
 # Pass ExtractDir for validation if in Directory mode
 if ($PSCmdlet.ParameterSetName -eq 'Directory') {
@@ -1317,7 +1620,7 @@ else {
     Confirm-RequiredPaths -StorageDir $StorageDir
 }
 
-# --- Prepare Analysis Flags ---
+# Prepare Analysis Flags
 # These flags are passed to both the checker and the IDA script for consistency.
 $analysisFlags = @{
     extract_dangerous_apis = -not $NoExtractDangerousApis.IsPresent
@@ -1357,6 +1660,19 @@ elseif ($PSCmdlet.ParameterSetName -eq 'Pid') {
 
 # Filter out files that have already been analyzed
 $files = Select-UnprocessedFiles -candidateFiles $candidateFiles -StorageDir $StorageDir -analysisFlags $analysisFlags
+
+# Symbol Download Phase
+# Download symbols for the files that will be analyzed (before IDA starts)
+if ($script:downloadSymbolsEnabled -and $files.Count -gt 0) {
+    # Set _NT_SYMBOL_PATH environment variable (user-level + current process)
+    Set-SymbolPath -SymbolStorePath $SymbolStorePath -SymbolServerUrl $SymbolServerUrl
+    
+    # Download symbols using symchk
+    $logsDir = Join-Path $StorageDir "logs"
+    Start-SymbolDownload -Files $files -SymchkExePath $script:SYMCHK_PATH `
+        -SymbolStorePath $SymbolStorePath -SymbolServerUrl $SymbolServerUrl `
+        -LogsDir $logsDir
+}
 
 if ($files.Count -gt 0) {
     # Export the list of files that will be analyzed to analyzed_modules_list.txt
