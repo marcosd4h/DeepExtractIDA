@@ -112,6 +112,7 @@ For large-scale analysis, clone the repository and use the `headless_batch_extra
   - **Directory Scan**: Recursively scan directories for PE files
   - **File List**: Process files from a text list (one path per line)
   - **PID Mode**: Extract all modules loaded by a running process
+- **Automatic Symbol Downloading**: Pre-downloads PDB symbols from Microsoft's symbol server using `symchk.exe` before IDA analysis (enabled by default, requires Windows SDK Debugging Tools)
 - **IDA Auto-Detection**: Automatically identifies the IDA installation (9.x series)
 - **Concurrent Processing**: Spawns multiple IDA processes (default: 4) for parallel analysis
 - **Conditional Filtering**: Tracks analyzed files to prevent redundant processing
@@ -186,6 +187,39 @@ C:\Analysis\pid_1234_processname_20260115_143022\
 .\headless_batch_extractor.ps1 -ExtractDir "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
 ```
 
+**Skip Symbol Downloading**
+
+```powershell
+# Disable automatic PDB downloading for faster startup
+.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -NoDownloadSymbols
+```
+
+**Custom Symbol Store Path**
+
+```powershell
+# Store symbols on a separate drive
+.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -SymbolStorePath "D:\MySymbols"
+```
+
+#### Symbol Downloading
+
+The script automatically downloads PDB debug symbols from Microsoft's public symbol server before running IDA analysis. This enables IDA to resolve function names, type information, and produce richer decompiled output.
+
+- **Enabled by default** -- disable with `-NoDownloadSymbols`
+- **Per-file downloads** -- only downloads symbols for the exact files being analyzed
+- **Concurrent** -- runs up to 10 parallel `symchk.exe` processes
+- **Cached** -- symbols are stored in a local symbol store (default: `C:\symbols`) and reused across runs
+- **Environment variable** -- automatically sets `_NT_SYMBOL_PATH` at user level (no admin required)
+
+**Requirements:** `symchk.exe` from the [Windows SDK Debugging Tools](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/). The script auto-detects it from standard Windows SDK installation paths, or you can specify it manually with `-SymchkPath`.
+
+| Flag                | Description                                            |
+| ------------------- | ------------------------------------------------------ |
+| `-NoDownloadSymbols` | Skip automatic PDB downloading (enabled by default)   |
+| `-SymbolStorePath`   | Local symbol cache directory (default: `C:\symbols`)  |
+| `-SymchkPath`        | Path to `symchk.exe` (auto-detected from Windows SDK) |
+| `-SymbolServerUrl`   | Symbol server URL (default: Microsoft public server)   |
+
 #### Analysis Flags
 
 | Flag                      | Description                                 |
@@ -215,7 +249,8 @@ C:\Analysis\pid_1234_processname_20260115_143022\
 │  └─ <filename>/                 # Generated C++ code (if enabled)
 │     └─ *.cpp
 ├─ logs/
-│  └─ <filename>_<timestamp>.log  # IDA analysis logs
+│  ├─ <filename>_<timestamp>.log  # IDA analysis logs
+│  └─ symchk_<filename>_*.log    # Symbol download logs (if enabled)
 └─ idb_cache/
    └─ <filename>_<hash>.i64       # IDA database files
 ```
@@ -358,6 +393,7 @@ If `--generate-cpp` is used, the tool creates a folder structure containing **on
 - **IDA Pro:** Version 9.0 or later (Pro edition required for headless mode)
 - **Decompiler:** Hex-Rays Decompiler (optional, but required for C-code generation and advanced analysis)
 - **Python:** Python 3 environment configured within IDA (built-in with IDA 9.x)
+- **Windows SDK Debugging Tools** (optional): Required for automatic symbol downloading (`symchk.exe`). Install from the [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/) -- select "Debugging Tools for Windows" during installation.
 - **Dependencies:**
   - `pefile` (Bundled in `deps/`; used for PE header parsing)
   - IDA Python SDK (built-in with IDA Pro)
