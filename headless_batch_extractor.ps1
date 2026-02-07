@@ -434,7 +434,7 @@ function Set-SymbolPath {
 }
 
 # Download symbols for a list of files using symchk.exe
-# Groups files by (ParentDirectory, Extension) and runs one symchk per group in parallel
+# Runs one symchk process per file with concurrency throttling
 function Start-SymbolDownload {
     param(
         [Parameter(Mandatory = $true)]
@@ -446,7 +446,8 @@ function Start-SymbolDownload {
         [Parameter(Mandatory = $true)]
         [string]$SymbolServerUrl,
         [Parameter(Mandatory = $true)]
-        [string]$LogsDir
+        [string]$LogsDir,
+        [int]$MaxConcurrent = 10
     )
     
     if ($Files.Count -eq 0) {
@@ -466,131 +467,172 @@ function Start-SymbolDownload {
         }
     }
     
-    # Group files by (ParentDirectory, Extension) for efficient batching
-    $groups = @{}
-    foreach ($file in $Files) {
-        $dir = $file.DirectoryName
-        $ext = $file.Extension.ToLower()  # e.g. ".dll", ".exe", ".sys"
-        $key = "$dir|$ext"
-        if (-not $groups.ContainsKey($key)) {
-            $groups[$key] = @{
-                Directory = $dir
-                Extension = $ext
-                Count     = 0
-            }
-        }
-        $groups[$key].Count++
-    }
-    
     $symbolServerArg = "srv*$SymbolStorePath*$SymbolServerUrl"
-    $totalGroups = $groups.Count
     $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
     
     Write-Host ""
     Write-Host "=== Symbol Download ===" -ForegroundColor Cyan
-    Write-Host "Downloading symbols for $($Files.Count) files across $totalGroups directory/extension groups"
+    Write-Host "Downloading symbols for $($Files.Count) file(s) (max $MaxConcurrent concurrent)"
     Write-Host "Symbol store: $SymbolStorePath"
     Write-Host "Symbol server: $SymbolServerUrl"
     Write-Host ""
     
-    # Launch all symchk processes in parallel
-    $symchkProcesses = [System.Collections.Generic.List[hashtable]]::new()
+    $downloadStartTime = Get-Date
     
-    foreach ($entry in $groups.GetEnumerator()) {
-        $group = $entry.Value
-        $dir = $group.Directory
-        $ext = $group.Extension      # e.g. ".dll"
-        $wildcard = "*$ext"           # e.g. "*.dll"
-        $targetPath = Join-Path $dir $wildcard
+    # Track active and completed processes
+    $activeProcesses = [System.Collections.Generic.List[hashtable]]::new()
+    $succeeded = 0
+    $failed = 0
+    $totalStarted = 0
+    
+    foreach ($file in $Files) {
+        $fileName = $file.Name
+        $filePath = $file.FullName
         
-        # Create a sanitized directory name for the log file
-        $sanitizedDir = $dir -replace '[\\/:*?"<>|]', '_'
-        $sanitizedDir = $sanitizedDir.Trim('_')
-        # Truncate to avoid overly long filenames
-        if ($sanitizedDir.Length -gt 80) {
-            $sanitizedDir = $sanitizedDir.Substring(0, 80)
+        # Throttle: wait for a slot to open if at max concurrency
+        while ($activeProcesses.Count -ge $MaxConcurrent) {
+            # Check for completed processes
+            $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
+            foreach ($entry in $activeProcesses) {
+                if ($entry.Process.HasExited) {
+                    # Harvest result
+                    $exitCode = $entry.Process.ExitCode
+                    
+                    # Write log files from captured output
+                    try { $entry.StdoutBuilder.ToString() | Out-File -FilePath $entry.LogFile -Encoding UTF8 -Force } catch { }
+                    $stderrContent = $entry.StderrBuilder.ToString()
+                    if (-not [string]::IsNullOrWhiteSpace($stderrContent)) {
+                        try { $stderrContent | Out-File -FilePath "$($entry.LogFile).err" -Encoding UTF8 -Force } catch { }
+                    }
+                    
+                    # Unregister events and dispose
+                    try { Unregister-Event -SourceIdentifier $entry.StdoutEvent.Name -ErrorAction SilentlyContinue } catch { }
+                    try { Unregister-Event -SourceIdentifier $entry.StderrEvent.Name -ErrorAction SilentlyContinue } catch { }
+                    try { $entry.Process.Dispose() } catch { }
+                    
+                    if ($exitCode -eq 0) {
+                        $succeeded++
+                    }
+                    else {
+                        $failed++
+                        Write-Host "  No symbols: $($entry.FileName) (exit code: $exitCode)" -ForegroundColor Yellow
+                    }
+                }
+                else {
+                    $stillRunning.Add($entry)
+                }
+            }
+            $activeProcesses = $stillRunning
+            
+            if ($activeProcesses.Count -ge $MaxConcurrent) {
+                Start-Sleep -Milliseconds 500
+            }
         }
-        $extClean = $ext.TrimStart('.')
-        $logFile = Join-Path $LogsDir "symchk_${sanitizedDir}_${extClean}_${timestamp}.log"
         
-        $symchkArgs = @('/v', '/s', $symbolServerArg, $targetPath)
+        # Create a sanitized filename for the log
+        $sanitizedName = $fileName -replace '[\\/:*?"<>|]', '_'
+        $logFile = Join-Path $LogsDir "symchk_${sanitizedName}_${timestamp}.log"
         
-        Write-Host "  Starting symchk: $dir\$wildcard ($($group.Count) files)" -ForegroundColor Gray
+        $symchkArgsStr = "/v /s `"$symbolServerArg`" `"$filePath`""
         
         try {
-            $process = Start-Process -FilePath $SymchkExePath -ArgumentList $symchkArgs `
-                -PassThru -WindowStyle Hidden `
-                -RedirectStandardOutput $logFile `
-                -RedirectStandardError "$logFile.err"
+            # Use System.Diagnostics.Process directly instead of Start-Process
+            # Start-Process with -RedirectStandardOutput breaks .ExitCode retrieval
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $SymchkExePath
+            $psi.Arguments = $symchkArgsStr
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
             
-            $symchkProcesses.Add(@{
-                    Process   = $process
-                    Directory = $dir
-                    Extension = $ext
-                    LogFile   = $logFile
-                    FileCount = $group.Count
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            
+            # Capture stdout/stderr asynchronously to avoid deadlocks
+            $stdoutBuilder = New-Object System.Text.StringBuilder
+            $stderrBuilder = New-Object System.Text.StringBuilder
+            
+            $stdoutEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+                if ($null -ne $EventArgs.Data) {
+                    $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null
+                }
+            } -MessageData $stdoutBuilder
+            
+            $stderrEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+                if ($null -ne $EventArgs.Data) {
+                    $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null
+                }
+            } -MessageData $stderrBuilder
+            
+            $proc.Start() | Out-Null
+            $proc.BeginOutputReadLine()
+            $proc.BeginErrorReadLine()
+            
+            $activeProcesses.Add(@{
+                    Process       = $proc
+                    FileName      = $fileName
+                    FilePath      = $filePath
+                    LogFile       = $logFile
+                    StdoutBuilder = $stdoutBuilder
+                    StderrBuilder = $stderrBuilder
+                    StdoutEvent   = $stdoutEvent
+                    StderrEvent   = $stderrEvent
                 })
+            $totalStarted++
+            
+            # Print progress periodically (every 50 files)
+            if ($totalStarted % 50 -eq 0) {
+                Write-Host "  Started $totalStarted / $($Files.Count) symchk processes..." -ForegroundColor Gray
+            }
         }
         catch {
-            Write-Warning "Failed to start symchk for '$targetPath': $($_.Exception.Message)"
+            Write-Warning "Failed to start symchk for '$filePath': $($_.Exception.Message)"
         }
     }
     
-    if ($symchkProcesses.Count -eq 0) {
-        Write-Warning "No symchk processes were started."
-        return
+    # Wait for remaining active processes to finish
+    if ($activeProcesses.Count -gt 0) {
+        Write-Host "  Waiting for final $($activeProcesses.Count) symchk process(es)..."
     }
     
-    # Wait for all symchk processes to complete
-    Write-Host ""
-    Write-Host "Waiting for $($symchkProcesses.Count) symchk process(es) to complete..."
-    
-    $downloadStartTime = Get-Date
-    foreach ($entry in $symchkProcesses) {
+    foreach ($entry in $activeProcesses) {
         try {
             $entry.Process.WaitForExit()
         }
         catch {
             Write-Warning "Error waiting for symchk process: $($_.Exception.Message)"
         }
-    }
-    $downloadDuration = (Get-Date) - $downloadStartTime
-    
-    # Report results
-    $succeeded = 0
-    $failed = 0
-    foreach ($entry in $symchkProcesses) {
-        $exitCode = -1
-        try {
-            $exitCode = $entry.Process.ExitCode
+        
+        $exitCode = $entry.Process.ExitCode
+        
+        # Write log files from captured output
+        try { $entry.StdoutBuilder.ToString() | Out-File -FilePath $entry.LogFile -Encoding UTF8 -Force } catch { }
+        $stderrContent = $entry.StderrBuilder.ToString()
+        if (-not [string]::IsNullOrWhiteSpace($stderrContent)) {
+            try { $stderrContent | Out-File -FilePath "$($entry.LogFile).err" -Encoding UTF8 -Force } catch { }
         }
-        catch { }
+        
+        # Unregister events and dispose
+        try { Unregister-Event -SourceIdentifier $entry.StdoutEvent.Name -ErrorAction SilentlyContinue } catch { }
+        try { Unregister-Event -SourceIdentifier $entry.StderrEvent.Name -ErrorAction SilentlyContinue } catch { }
+        try { $entry.Process.Dispose() } catch { }
         
         if ($exitCode -eq 0) {
             $succeeded++
-            Write-Host "  Completed: $($entry.Directory)\*$($entry.Extension) ($($entry.FileCount) files)" -ForegroundColor Green
         }
         else {
-            # symchk returns non-zero if some symbols are missing, which is common and not fatal
             $failed++
-            Write-Host "  Partial/failed: $($entry.Directory)\*$($entry.Extension) (exit code: $exitCode, log: $($entry.LogFile))" -ForegroundColor Yellow
-        }
-        
-        # Dispose process object
-        try { $entry.Process.Dispose() } catch { }
-        
-        # Clean up empty error log files
-        $errLog = "$($entry.LogFile).err"
-        if ((Test-Path $errLog) -and (Get-Item $errLog).Length -eq 0) {
-            Remove-Item $errLog -ErrorAction SilentlyContinue
+            Write-Host "  No symbols: $($entry.FileName) (exit code: $exitCode)" -ForegroundColor Yellow
         }
     }
     
+    $downloadDuration = (Get-Date) - $downloadStartTime
     $durationStr = "{0:N1}" -f $downloadDuration.TotalMinutes
     Write-Host ""
-    Write-Host "Symbol download completed in $durationStr minutes. Groups: $succeeded succeeded, $failed had missing symbols." -ForegroundColor Cyan
+    Write-Host "Symbol download completed in $durationStr minutes. $succeeded succeeded, $failed had no symbols available." -ForegroundColor Cyan
     if ($failed -gt 0) {
-        Write-Host "Note: Partial failures are normal - not all PE files have public symbols available." -ForegroundColor Yellow
+        Write-Host "Note: Missing symbols are normal - not all PE files have public symbols available." -ForegroundColor Yellow
     }
     Write-Host ""
 }

@@ -307,11 +307,12 @@ class DeepExtractModule(ida_idaapi.plugmod_t):
                     
                     # Show success message
                     ida_kernwin.hide_wait_box()
+                    cpp_msg = f"C++ files generated in:\n  {config.output_dir}" if config.generate_cpp else ""
                     ida_kernwin.info(
                         f"DeepExtract Analysis Complete!\n\n"
                         f"Results saved to:\n"
                         f"  {config.sqlite_db_path}\n\n"
-                        f"{'C++ files generated in:\n  ' + str(config.output_dir) if config.generate_cpp else ''}"
+                        f"{cpp_msg}"
                     )
                 else:
                     debug_print("=" * 80)
