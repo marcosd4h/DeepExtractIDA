@@ -711,7 +711,7 @@ function Get-CandidateFilesFromDirectory {
         $searchParams['Recurse'] = $true
     }
 
-    $allFiles = Get-ChildItem @searchParams | 
+    $allFiles = Get-ChildItem @searchParams -ErrorAction SilentlyContinue | 
     Where-Object { $_.Extension.ToLower() -in '.exe', '.sys', '.dll' }
 
     Write-Host "Found $($allFiles.Count) total files matching extension criteria"
