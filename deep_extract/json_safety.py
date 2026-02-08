@@ -108,28 +108,73 @@ def to_json_safe(obj: Any,
             metadata['original_size'] = json_bytes
             metadata['truncated'] = True
             
-            # Try progressive truncation strategies
+            # Try progressive truncation strategies based on data type
             if isinstance(serializable_obj, dict):
-                # Strategy 1: Remove large fields
+                # Strategy 1a: Remove large fields from dict
                 serializable_obj = _truncate_large_dict_fields(serializable_obj, max_bytes)
                 json_str = json.dumps(serializable_obj, ensure_ascii=False, sort_keys=True)
                 json_bytes = len(json_str.encode('utf-8'))
             
+            elif isinstance(serializable_obj, list):
+                # Strategy 1b: Binary-search truncation for lists.
+                # Progressively halve the list until serialized size is under the limit,
+                # preserving the list type (schema stability) and appending a truncation sentinel.
+                original_count = len(serializable_obj)
+                lo, hi = 0, original_count
+                best_count = 0
+                while lo <= hi:
+                    mid = (lo + hi) // 2
+                    candidate = serializable_obj[:mid]
+                    candidate_json = json.dumps(candidate, ensure_ascii=False, sort_keys=True)
+                    candidate_bytes = len(candidate_json.encode('utf-8'))
+                    # Reserve ~1KB for the truncation sentinel metadata
+                    if candidate_bytes <= max_bytes - 1024:
+                        best_count = mid
+                        lo = mid + 1
+                    else:
+                        hi = mid - 1
+                
+                serializable_obj = serializable_obj[:best_count]
+                serializable_obj.append({
+                    "_truncated": True,
+                    "original_count": original_count,
+                    "shown_count": best_count,
+                    "reason": "byte_size_limit_exceeded",
+                    "original_size_bytes": json_bytes,
+                    "max_bytes": max_bytes
+                })
+                warning_msg = (f"Field '{field_name}' exceeded max size ({json_bytes} > {max_bytes} bytes). "
+                              f"Truncated list from {original_count} to {best_count} items to fit limit.")
+                debug_print(f"WARNING - {warning_msg}")
+                json_str = json.dumps(serializable_obj, ensure_ascii=False, sort_keys=True)
+                json_bytes = len(json_str.encode('utf-8'))
+            
             if json_bytes > max_bytes:
-                # Strategy 2: Aggressive truncation
+                # Strategy 2: Last-resort aggressive truncation (preserves original data type shape)
                 warning_msg = (f"Field '{field_name}' exceeded max size ({json_bytes} > {max_bytes} bytes). "
                               f"Truncating to prevent database corruption.")
                 debug_print(f"WARNING - {warning_msg}")
                 
-                # Create minimal error object
-                error_obj = {
-                    '_error': 'size_limit_exceeded',
-                    'original_size_bytes': json_bytes,
-                    'max_bytes': max_bytes,
-                    'field_name': field_name,
-                    'message': warning_msg
-                }
-                json_str = json.dumps(error_obj)
+                if isinstance(serializable_obj, list):
+                    # Preserve list type: return empty list with truncation metadata
+                    json_str = json.dumps([{
+                        '_truncated': True,
+                        '_error': 'size_limit_exceeded',
+                        'original_size_bytes': json_bytes,
+                        'max_bytes': max_bytes,
+                        'field_name': field_name,
+                        'message': warning_msg
+                    }])
+                else:
+                    # Dict or other: return error dict
+                    error_obj = {
+                        '_error': 'size_limit_exceeded',
+                        'original_size_bytes': json_bytes,
+                        'max_bytes': max_bytes,
+                        'field_name': field_name,
+                        'message': warning_msg
+                    }
+                    json_str = json.dumps(error_obj)
         
         return json_str
         

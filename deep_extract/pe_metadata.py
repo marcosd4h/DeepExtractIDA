@@ -100,12 +100,13 @@ def extract_imports() -> List[Dict[str, Any]]:
             if isinstance(module_name, bytes):
                 module_name = safe_decode(module_name)
 
-            # Ensure module name ends with .dll (case-insensitive)
-            if not module_name.lower().endswith('.dll'):
-                 module_name += ".dll"
-
-            # Store the original (raw) module name
+            # Store the original (raw) module name BEFORE any modification
             raw_module_name = module_name
+
+            # Ensure module name ends with a valid PE extension.
+            # Windows imports can come from .dll, .drv, .sys, or .exe modules.
+            if not any(module_name.lower().endswith(ext) for ext in constants._VALID_MODULE_EXTENSIONS):
+                module_name += ".dll"
             
             # Resolve API-set DLLs to actual implementing DLLs
             resolved_module_name = constants.resolve_apiset(module_name)
@@ -332,6 +333,8 @@ def extract_all_entry_points() -> List[Dict[str, Any]]:
     start_time = time.time()
     entry_points = []
     
+    skipped_data_exports = 0
+    skipped_forwarded = 0
     try:
         entry_qty = ida_entry.get_entry_qty()
         debug_print(f"Found {entry_qty} total entry points (including exports)")
@@ -344,6 +347,23 @@ def extract_all_entry_points() -> List[Dict[str, Any]]:
                     entry_ea = ida_entry.get_entry(entry_ordinal)
                     
                     if entry_ea != idaapi.BADADDR:
+                        # --- Early filters to skip non-code entry points ---
+                        # Skip forwarded exports (they resolve to forwarder strings
+                        # in .rdata, not executable code). Forwarded exports are
+                        # already captured by extract_exports() with full metadata.
+                        forwarder = ida_entry.get_entry_forwarder(entry_ordinal)
+                        if forwarder:
+                            skipped_forwarded += 1
+                            continue
+                        
+                        # Skip data exports (addresses in non-code segments like
+                        # .rdata, .data, .bss). These are exported variables, not
+                        # functions. Saves expensive name/signature extraction.
+                        flags = ida_bytes.get_flags(entry_ea)
+                        if not ida_bytes.is_code(flags):
+                            skipped_data_exports += 1
+                            continue
+                        
                         entry_name = ida_entry.get_entry_name(entry_ordinal)
                         func = ida_funcs.get_func(entry_ea)
                         
@@ -392,8 +412,13 @@ def extract_all_entry_points() -> List[Dict[str, Any]]:
         debug_print(f"ERROR - Error during entry points extraction: {str(e)}")
         debug_print(traceback.format_exc())
     
+    if skipped_data_exports > 0 or skipped_forwarded > 0:
+        debug_print(f"Filtered out {skipped_data_exports} data export(s) and "
+                   f"{skipped_forwarded} forwarded export(s) from entry points")
+    
     duration = time.time() - start_time
-    debug_print(f"TRACE - Finished: extract_all_entry_points. Found {len(entry_points)} entry points. Duration: {duration:.4f}s")
+    debug_print(f"TRACE - Finished: extract_all_entry_points. Found {len(entry_points)} code entry points "
+               f"(skipped {skipped_data_exports} data, {skipped_forwarded} forwarded). Duration: {duration:.4f}s")
     return entry_points
 
 
@@ -418,8 +443,19 @@ def extract_all_entry_points_with_methods():
         if (entry_ea, method) in detected_pairs:
             return
 
+        # Quick pre-check: skip addresses that don't point to code.
+        # This catches data exports and forwarded exports without the
+        # overhead of segment permission checks or function creation.
+        try:
+            flags = ida_bytes.get_flags(entry_ea)
+            if not ida_bytes.is_code(flags):
+                debug_print(f"TRACE - Skipping non-code address 0x{entry_ea:X} from {details}")
+                return
+        except Exception:
+            pass  # Fall through to full validation if flags check fails
+
         if not _validate_entry_point_address(entry_ea):
-            debug_print(f"Skipping invalid entry point 0x{entry_ea:X} from {details}")
+            debug_print(f"TRACE - Skipping non-code entry point 0x{entry_ea:X} from {details}")
             return
 
         # Ensure function is defined
@@ -703,26 +739,28 @@ def extract_pe_metadata(pe):
             }
             metadata["sections"].append(sec_info)
 
-        # Extract PDB Path
+        # Extract PDB Path (try multiple methods, no early returns so duration logging is always reached)
+        pdb_found = False
         try:
             pdb_path_ida = ida_loader.get_path(ida_loader.PATH_TYPE_PDB)
             if pdb_path_ida:
                 metadata["pdb_path"] = pdb_path_ida
-                return metadata
+                pdb_found = True
         except AttributeError:
             pass
 
         # Try legacy API
-        try:
-            pdb_path_ida = ida_nalt.get_pdb_path()
-            if pdb_path_ida:
-                metadata["pdb_path"] = pdb_path_ida
-                return metadata
-        except AttributeError:
-            pass
+        if not pdb_found:
+            try:
+                pdb_path_ida = ida_nalt.get_pdb_path()
+                if pdb_path_ida:
+                    metadata["pdb_path"] = pdb_path_ida
+                    pdb_found = True
+            except AttributeError:
+                pass
 
         # Fallback to pefile parsing
-        if hasattr(pe, 'DIRECTORY_ENTRY_DEBUG'):
+        if not pdb_found and hasattr(pe, 'DIRECTORY_ENTRY_DEBUG'):
             for entry_idx, entry in enumerate(pe.DIRECTORY_ENTRY_DEBUG):
                 if entry.struct.Type == pefile.DEBUG_TYPE['IMAGE_DEBUG_TYPE_CODEVIEW']:
                     try:

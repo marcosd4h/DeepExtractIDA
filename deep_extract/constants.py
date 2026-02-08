@@ -84,13 +84,15 @@ CRYPTO_CONSTANTS = frozenset([
 ANTI_DEBUG_APIS = frozenset([
     'isdebuggerpresent', 'checkremotedebuggerpresent',
     'ntquerysysteminformation', 'ntqueryinformationprocess',
-    'ntsetinformationthread', 'ntquerysysteminformation',
+    'ntsetinformationthread',
+    'ntqueryobject',  # Querying debug objects
+    'zwqueryinformationprocess',  # Kernel-mode variant of NtQueryInformationProcess
     'outputdebugstringa', 'outputdebugstringw',
     'findwindowa', 'findwindoww',  # Looking for debugger windows
     'getwindowthreadprocessid',  # Detecting debugger processes
     'createtoolhelp32snapshot', 'process32first', 'process32next',  # Process enumeration
     'queryperformancecounter', 'gettickcount', 'gettickcount64',  # Timing checks
-    'ntcreatethreadex', 'ntsetinformationthread',  # Thread hiding
+    'ntcreatethreadex',  # Thread hiding
     'zwsetsystemtime',  # System manipulation
 ])
 
@@ -202,19 +204,6 @@ def _sanitize_apiset_map(raw_map: dict) -> dict:
     return sanitized
 
 APISET_MAP = _sanitize_apiset_map(_load_json_data('apisets.json', default={}))
-_EXTRA_APISET_MAP = {}
-try:
-    repo_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-    default_extra_path = os.path.join(repo_root, 'work', 'ApiSetMappings.json')
-    extra_path = os.environ.get("EXTRACTOR_APISET_MAP_PATH", default_extra_path)
-    _EXTRA_APISET_MAP = _load_apiset_map_from_path(extra_path)
-except Exception:
-    _EXTRA_APISET_MAP = {}
-
-if _EXTRA_APISET_MAP:
-    # Only add missing entries to avoid overriding curated mappings.
-    for _k, _v in _EXTRA_APISET_MAP.items():
-        APISET_MAP.setdefault(_k, _v)
 _APISET_KEYS_SORTED = sorted(APISET_MAP.keys())
 _UNRESOLVED_APISET_LOGGED = set()
 

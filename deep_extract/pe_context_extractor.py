@@ -1026,6 +1026,7 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
         decompiled_code = ""
         if has_decompiler:
             decompile_start = time.perf_counter()
+            decompiler = None
             try:
                 func_size = func.end_ea - func.start_ea
                 if func_size > constants.DECOMPILATION_SIZE_WARNING:
@@ -1041,6 +1042,11 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             except Exception as e:
                 decompiled_code = f"Decompilation failed: {str(e)}"
                 analysis_errors.append({"stage": "decompile", "error": str(e)})
+            finally:
+                # Explicitly release the cfuncptr_t object to free type info references.
+                # Without this, IDA's type system accumulates leaked refcounts across
+                # thousands of decompilations, causing "Type info leak" warnings on exit.
+                decompiler = None
             _profile_add_stage(profile, "decompile", time.perf_counter() - decompile_start, ea, demangled_name)
         else:
             decompiled_code = "Decompiler not available"
@@ -1169,8 +1175,12 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             dangerous_start = time.perf_counter()
             try:
                 dangerous_calls = extractor_core.check_for_dangerous_calls(xref_data["outbound_xrefs"])
-                if not json_safety.validate_json_field(dangerous_calls, "dangerous_api_calls")[0]:
-                    dangerous_calls = json_safety.to_json_safe(json.loads(dangerous_calls), field_name="dangerous_api_calls")
+                # Validate the JSON string; if malformed, fall back to empty list.
+                # Previous code tried json.loads + re-serialize on failure which would
+                # itself throw on truly invalid JSON.  Simple fallback is safer.
+                if dangerous_calls and not json_safety.validate_json_field(dangerous_calls, "dangerous_api_calls")[0]:
+                    debug_print(f"WARNING - Dangerous API calls JSON failed validation for 0x{ea:X}, resetting to empty")
+                    dangerous_calls = "[]"
             except Exception as e:
                 dangerous_calls = None
                 analysis_errors.append({"stage": "dangerous_api_calls", "error": str(e)})
