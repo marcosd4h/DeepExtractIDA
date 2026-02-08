@@ -157,10 +157,12 @@ def extract_imports() -> List[Dict[str, Any]]:
                     actual_name = short_demangled_name if short_demangled_name else cleaned_name
                     extended_signature = re.sub(sub_pattern, actual_name, extended_signature, flags=re.IGNORECASE)
 
+                raw_name_demangled = safe_decode(short_demangled_name) if short_demangled_name else cleaned_name
                 import_info = {
                     "address": f"0x{ea:X}",
                     "mangled_name": cleaned_name,
-                    "raw_name": name_str,
+                    "raw_name": raw_name_demangled,
+                    "raw_name_mangled": name_str,
                     "function_name": safe_decode(short_demangled_name),
                     "function_signature_extended": safe_decode(extended_signature),
                     "ordinal": ordinal,
@@ -248,11 +250,14 @@ def extract_exports() -> List[Dict[str, Any]]:
                 is_forwarded = True
                 forwarded_to = safe_decode(forwarder_data)
 
+            raw_name_demangled = safe_decode(short_demangled_name) if short_demangled_name else name_str
             export_info = {
                 "index": index,
                 "address": f"0x{ea:X}",
                 "mangled_name": name_str,
-                "function_name": safe_decode(short_demangled_name) if short_demangled_name else name_str,
+                "raw_name": raw_name_demangled,
+                "raw_name_mangled": name_str,
+                "function_name": raw_name_demangled,
                 "function_signature_extended": safe_decode(extended_signature),
                 "ordinal": ordinal,
                 "is_forwarded": is_forwarded
@@ -507,7 +512,8 @@ def extract_all_entry_points_with_methods():
         pe_header_methods = [
             ("ida_ida.inf_get_start_ip()", lambda: ida_ida.inf_get_start_ip() if hasattr(ida_ida, 'inf_get_start_ip') else None),
             ("idc.get_inf_attr(INF_START_IP)", lambda: _rebase_pe_entry_point(idc.get_inf_attr(idc.INF_START_IP)) if hasattr(idc, 'INF_START_IP') else None),
-            ("idc.get_inf_attr(3)", lambda: _rebase_pe_entry_point(idc.get_inf_attr(3)))
+            # INF_START_EA (16) returns the linear address of program entry point
+            ("idc.get_inf_attr(INF_START_EA)", lambda: idc.get_inf_attr(idc.INF_START_EA) if hasattr(idc, 'INF_START_EA') else None),
         ]
 
         for name, method_func in pe_header_methods:
@@ -1639,12 +1645,19 @@ def _rebase_pe_entry_point(raw_rva):
         if _cached_is_loaded(raw_rva):
             return raw_rva
 
+        # Sanity check: a valid RVA should be within reasonable PE image bounds.
+        # Values below 0x1000 (page size) are almost certainly not valid RVAs --
+        # they are likely IDP flags, register values, or other non-address data.
+        if raw_rva < 0x1000:
+            debug_print(f"TRACE - Skipping rebase for implausible RVA 0x{raw_rva:X} (too small)")
+            return idaapi.BADADDR
+
         # Otherwise treat as RVA and add image base
         image_base = ida_nalt.get_imagebase()
         entry_ea = image_base + raw_rva
 
         if not _cached_is_loaded(entry_ea):
-            debug_print(f"WARNING - Rebasing failed, computed EA 0x{entry_ea:X} not mapped")
+            debug_print(f"TRACE - Rebasing did not resolve: RVA 0x{raw_rva:X} + ImageBase 0x{image_base:X} = 0x{entry_ea:X} (not mapped)")
             return idaapi.BADADDR
 
         debug_print(f"Rebasing PE entry point: RVA 0x{raw_rva:X} + ImageBase 0x{image_base:X} = VA 0x{entry_ea:X}")

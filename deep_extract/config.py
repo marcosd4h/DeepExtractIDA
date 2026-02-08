@@ -226,7 +226,8 @@ class AnalysisConfig:
                 raise ValueError(f"Invalid thunk_depth: {e}")
         
         # Validate min_conf if provided
-        min_conf = args.get('min_conf')
+        # Note: argparse stores --min-call-conf as 'min_call_conf' (hyphens -> underscores)
+        min_conf = args.get('min_call_conf') or args.get('min_conf')
         if min_conf is not None:
             try:
                 min_conf = float(min_conf)

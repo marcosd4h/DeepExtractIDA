@@ -2,10 +2,13 @@
 C++ file generation for the extraction tool.
 Adapted from file_generator.py to work with extraction_tool database schema.
 """
+import hashlib
 import json
+import os
 import pathlib
 import re
 import sqlite3
+import sys
 import textwrap
 from typing import List, Set, Tuple, Optional, Any
 
@@ -19,8 +22,18 @@ class CppGenerator:
     def __init__(self, output_dir: pathlib.Path, module_name: str):
         self.output_dir = output_dir
         self.module_name = module_name
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Use long-path prefix on Windows so deeply-nested output dirs succeed
+        self._long_path(self.output_dir).mkdir(parents=True, exist_ok=True)
     
+    # Maximum base filename length (without .cpp extension).
+    # NTFS allows 255-char filenames; we reserve room for the extension and
+    # counter suffixes like "_123.cpp" (8 chars) to stay well within limits.
+    MAX_BASE_FILENAME_LENGTH = 200
+
+    # Windows MAX_PATH is 260 (including null terminator), so 259 usable chars.
+    # We reserve room for separator + extension + counter suffix ("_123.cpp" = 8).
+    WINDOWS_MAX_PATH = 259
+
     @staticmethod
     def sanitize_filename(name: str) -> str:
         """Sanitizes a string to be a valid filename component."""
@@ -30,6 +43,62 @@ class CppGenerator:
         name = re.sub(r'[^a-zA-Z0-9_.-]', '_', name)
         # Limit length to avoid OS issues
         return name[:100]
+
+    @staticmethod
+    def _long_path(p: pathlib.Path) -> pathlib.Path:
+        """Return a path with the ``\\\\?\\`` long-path prefix on Windows.
+
+        This allows file operations to exceed the legacy 260-character MAX_PATH
+        limit without requiring a registry or manifest change.  On non-Windows
+        platforms the path is returned unchanged.
+        """
+        if sys.platform != "win32":
+            return p
+        s = str(p.resolve())
+        if s.startswith("\\\\?\\"):
+            return pathlib.Path(s)
+        return pathlib.Path("\\\\?\\" + s)
+
+    @classmethod
+    def _cap_filename_length(cls, base_filename: str, output_dir: 'pathlib.Path | None' = None) -> str:
+        """Caps the total base filename to avoid exceeding OS path limits.
+        
+        When an output_dir is provided, the cap is computed dynamically so that
+        the full path (directory + separator + filename + ".cpp") stays within
+        Windows MAX_PATH (259 usable chars).  Falls back to the static
+        MAX_BASE_FILENAME_LENGTH when no directory is given.
+        
+        When truncation is needed, appends a short hash of the original name
+        to maintain uniqueness between similarly-named functions.
+        
+        Args:
+            base_filename: The assembled filename (without extension)
+            output_dir: Optional output directory to compute path-aware limit
+            
+        Returns:
+            A filename guaranteed to fit within OS path limits
+        """
+        # Compute the effective limit
+        limit = cls.MAX_BASE_FILENAME_LENGTH
+
+        if output_dir is not None:
+            # Resolve the directory so we measure the real absolute path length.
+            # Account for: dir_path + os.sep + base_filename + "_9999.cpp"
+            #   - 1 for os.sep
+            #   - 4 for ".cpp"
+            #   - 5 for worst-case counter suffix "_9999"
+            dir_len = len(str(output_dir.resolve()))
+            path_aware_limit = cls.WINDOWS_MAX_PATH - dir_len - 1 - len(".cpp") - 5
+            # Use the more restrictive of the two limits (but never below a sane minimum)
+            limit = max(60, min(limit, path_aware_limit))
+
+        if len(base_filename) <= limit:
+            return base_filename
+        # Use 10-char hash suffix for uniqueness after truncation
+        name_hash = hashlib.md5(base_filename.encode('utf-8', errors='replace')).hexdigest()[:10]
+        # Truncate and append hash: leave room for "_" + hash
+        truncated = base_filename[:limit - 11] + "_" + name_hash
+        return truncated
     
     def generate_cpp_files(self, processed_funcs: List[sqlite3.Row]) -> Tuple[int, int]:
         """Generate C++ source files from extracted functions."""
@@ -154,8 +223,12 @@ class CppGenerator:
             sanitized_class_name = self.sanitize_filename(class_name)
             sanitized_method_name = self.sanitize_filename(method_name)
             
-            # Generate unique filename
-            base_filename = f"{self.module_name}_{sanitized_class_name}_{sanitized_method_name}"
+            # Generate unique filename, capping total length to avoid OS path limits
+            # Pass output_dir so the cap accounts for the full path on Windows (MAX_PATH=260)
+            base_filename = self._cap_filename_length(
+                f"{self.module_name}_{sanitized_class_name}_{sanitized_method_name}",
+                output_dir=self.output_dir,
+            )
             output_filename = f"{base_filename}.cpp"
             counter = 1
             while (self.output_dir / output_filename) in used_filenames:
@@ -198,8 +271,12 @@ class CppGenerator:
             if not sanitized_func_name:
                 sanitized_func_name = "unnamed_standalone_function"
             
-            # Generate unique filename
-            base_filename = f"{self.module_name}_standalone_{sanitized_func_name}"
+            # Generate unique filename, capping total length to avoid OS path limits
+            # Pass output_dir so the cap accounts for the full path on Windows (MAX_PATH=260)
+            base_filename = self._cap_filename_length(
+                f"{self.module_name}_standalone_{sanitized_func_name}",
+                output_dir=self.output_dir,
+            )
             output_filename = f"{base_filename}.cpp"
             counter = 1
             while (self.output_dir / output_filename) in used_filenames:
@@ -229,7 +306,9 @@ class CppGenerator:
                        mangled_name: Optional[str] = None,
                        signature_extended: Optional[str] = None):
         """Write a C++ source file."""
-        with open(file_path, 'w', encoding='utf-8') as f:
+        # Use long-path prefix on Windows to avoid MAX_PATH failures
+        safe_path = self._long_path(file_path)
+        with open(safe_path, 'w', encoding='utf-8') as f:
             header_lines = []
             if function_name:
                 header_lines.append(f"// Function Name: {function_name}")
@@ -326,8 +405,8 @@ class CppGenerator:
         # Build structured dictionary
         data_dict = self._build_file_info_dict(file_info, function_names, db_path)
         
-        # Write JSON file
-        with open(json_file_path, 'w', encoding='utf-8') as json_file:
+        # Write JSON file (use long-path prefix on Windows)
+        with open(self._long_path(json_file_path), 'w', encoding='utf-8') as json_file:
             json.dump(data_dict, json_file, indent=4, ensure_ascii=False)
         
         debug_print(f"Successfully generated file info JSON: {json_file_path}")
@@ -365,7 +444,8 @@ class CppGenerator:
         debug_print(f"Writing {len(function_names)} function names and "
                    f"file info to {markdown_file_path}")
         
-        with open(markdown_file_path, 'w', encoding='utf-8') as md_file:
+        # Use long-path prefix on Windows to avoid MAX_PATH failures
+        with open(self._long_path(markdown_file_path), 'w', encoding='utf-8') as md_file:
             md_file.write(f"# File Information for Module: {self.module_name}\n\n")
                          
             # Write file info sections

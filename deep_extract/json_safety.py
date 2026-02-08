@@ -6,6 +6,7 @@ and guaranteed serializability to prevent database corruption and handle edge ca
 """
 
 import json
+import os
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 from datetime import datetime
@@ -491,11 +492,27 @@ def apply_field_limits(xref_list: List[Any], max_xrefs: int = 10000) -> List[Any
 
 
 # Convenience functions for common field types
+def _get_max_xrefs() -> int:
+    """Get the max xref limit from environment with sane fallback."""
+    raw = os.environ.get("EXTRACTOR_MAX_XREFS", "")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = 50000
+    # Clamp to a reasonable range to avoid zero/negative or runaway values.
+    if value < 1000:
+        value = 1000
+    if value > 500000:
+        value = 500000
+    return value
+
+
 def safe_serialize_xrefs(xrefs: List[Dict[str, Any]], field_name: str = "xrefs") -> str:
     """Safely serialize cross-reference list."""
-    # Apply xref-specific limits
-    limited_xrefs = apply_field_limits(xrefs, max_xrefs=10000)
-    return to_json_safe(limited_xrefs, field_name=field_name)
+    max_xrefs = _get_max_xrefs()
+    if len(xrefs) > max_xrefs:
+        debug_print(f"WARNING - Xref list exceeds limit ({len(xrefs)} > {max_xrefs}); truncation may occur")
+    return to_json_safe(xrefs, max_list_items=max_xrefs, field_name=field_name)
 
 
 def safe_serialize_strings(strings: List[str], field_name: str = "strings") -> str:

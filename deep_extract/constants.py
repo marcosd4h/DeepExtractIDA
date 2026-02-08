@@ -133,9 +133,55 @@ def _load_json_data(filename, default=None):
         pass
     return default
 
+
+# Valid PE module extensions for API-set target resolution.
+# Windows API-sets can map to .dll, .drv (e.g. winspool.drv), .sys (kernel
+# drivers like win32kfull.sys, dxgkrnl.sys), or .exe modules.
+_VALID_MODULE_EXTENSIONS = ('.dll', '.drv', '.sys', '.exe')
+
+
+def _load_apiset_map_from_path(path: str) -> dict:
+    """Load API-set mappings from a JSON file path."""
+    try:
+        if not path or not os.path.exists(path):
+            return {}
+        with open(path, 'r') as f:
+            raw = json.load(f)
+    except Exception:
+        return {}
+
+    # Support both dict-form and list-form inputs.
+    if isinstance(raw, dict):
+        return _sanitize_apiset_map(raw)
+
+    if isinstance(raw, list):
+        converted = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            api_set = entry.get("apiSetName")
+            hosts = entry.get("hosts") or []
+            if not isinstance(api_set, str) or not hosts:
+                continue
+            host = hosts[0]
+            if not isinstance(host, str) or not host.strip():
+                continue  # Skip empty or whitespace-only host values
+            key = api_set.lower()
+            if not key.endswith(".dll"):
+                key += ".dll"
+            value = host.lower().strip()
+            # Only append .dll if the value doesn't already have a valid PE
+            # module extension (e.g. .sys, .drv are legitimate targets).
+            if not any(value.endswith(ext) for ext in _VALID_MODULE_EXTENSIONS):
+                value += ".dll"
+            converted[key] = value
+        return _sanitize_apiset_map(converted)
+
+    return {}
+
 # Load API-Set map
 def _sanitize_apiset_map(raw_map: dict) -> dict:
-    """Remove malformed entries and normalize key casing."""
+    """Remove malformed entries, normalize key casing, and skip self-referencing entries."""
     sanitized = {}
     if not isinstance(raw_map, dict):
         return sanitized
@@ -143,15 +189,32 @@ def _sanitize_apiset_map(raw_map: dict) -> dict:
         if not isinstance(key, str) or not isinstance(value, str):
             continue
         normalized_key = key.lower()
-        normalized_value = value.lower()
+        normalized_value = value.lower().strip()
         if not normalized_key.endswith(".dll"):
             normalized_key += ".dll"
-        if not normalized_value or not normalized_value.endswith(".dll"):
+        # Reject empty values or values that are not valid PE module names
+        if not normalized_value or not any(normalized_value.endswith(ext) for ext in _VALID_MODULE_EXTENSIONS):
+            continue
+        # Skip self-referencing entries (key == value provides no resolution)
+        if normalized_key == normalized_value:
             continue
         sanitized[normalized_key] = normalized_value
     return sanitized
 
 APISET_MAP = _sanitize_apiset_map(_load_json_data('apisets.json', default={}))
+_EXTRA_APISET_MAP = {}
+try:
+    repo_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    default_extra_path = os.path.join(repo_root, 'work', 'ApiSetMappings.json')
+    extra_path = os.environ.get("EXTRACTOR_APISET_MAP_PATH", default_extra_path)
+    _EXTRA_APISET_MAP = _load_apiset_map_from_path(extra_path)
+except Exception:
+    _EXTRA_APISET_MAP = {}
+
+if _EXTRA_APISET_MAP:
+    # Only add missing entries to avoid overriding curated mappings.
+    for _k, _v in _EXTRA_APISET_MAP.items():
+        APISET_MAP.setdefault(_k, _v)
 _APISET_KEYS_SORTED = sorted(APISET_MAP.keys())
 _UNRESOLVED_APISET_LOGGED = set()
 

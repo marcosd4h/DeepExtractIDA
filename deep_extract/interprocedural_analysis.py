@@ -455,9 +455,12 @@ def _track_register_value_at_call(call_ea: int, reg_name: str, max_depth: int = 
     current_ea = call_ea
     tracked_reg = reg_name.lower()
     transform_ops: List[Tuple[str, int]] = []
+    # Compute lower search bound: function start or a safe fallback
+    func = ida_funcs.get_func(call_ea)
+    minea = func.start_ea if func else 0
 
     for _ in range(max_depth):
-        current_ea = ida_bytes.prev_head(current_ea)
+        current_ea = ida_bytes.prev_head(current_ea, minea)
         if current_ea == ida_idaapi.BADADDR:
             break
 
@@ -516,8 +519,11 @@ def _track_register_value_at_call(call_ea: int, reg_name: str, max_depth: int = 
 def _track_stack_argument(call_ea: int, stack_offset: int, max_depth: int = 40) -> Optional[int]:
     """Track stack argument written to [rsp+offset] or [rbp+offset]."""
     current_ea = call_ea
+    # Compute lower search bound: function start or a safe fallback
+    func = ida_funcs.get_func(call_ea)
+    minea = func.start_ea if func else 0
     for _ in range(max_depth):
-        current_ea = ida_bytes.prev_head(current_ea)
+        current_ea = ida_bytes.prev_head(current_ea, minea)
         if current_ea == ida_idaapi.BADADDR:
             break
 
@@ -548,9 +554,12 @@ def _track_pushed_arguments(call_ea: int, param_idx: int, max_depth: int = 40) -
     """Track x86-style pushed arguments (right-to-left)."""
     current_ea = call_ea
     pushed_values: List[Optional[int]] = []
+    # Compute lower search bound: function start or a safe fallback
+    func = ida_funcs.get_func(call_ea)
+    minea = func.start_ea if func else 0
 
     for _ in range(max_depth):
-        current_ea = ida_bytes.prev_head(current_ea)
+        current_ea = ida_bytes.prev_head(current_ea, minea)
         if current_ea == ida_idaapi.BADADDR:
             break
 

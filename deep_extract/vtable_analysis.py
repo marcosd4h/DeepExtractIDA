@@ -286,9 +286,12 @@ def find_vtable_base_address(ea, obj_reg):
         # Look backward through instructions to find vtable loading
         search_limit = constants.VTABLE_SEARCH_LIMIT
         current_ea = ea
+        # Compute lower search bound: function start or a safe fallback
+        func = ida_funcs.get_func(ea)
+        minea = func.start_ea if func else 0
         
         for i in range(search_limit):
-            current_ea = ida_bytes.prev_head(current_ea)
+            current_ea = ida_bytes.prev_head(current_ea, minea)
             if current_ea == ida_idaapi.BADADDR:
                 break
                 
@@ -329,9 +332,12 @@ def _resolve_register_value(ea: int, reg: int) -> int:
         tracked_reg = reg
         search_limit = constants.VTABLE_SEARCH_LIMIT
         frame_regs = {"rbp", "ebp", "rsp", "esp"}
+        # Compute lower search bound: function start or a safe fallback
+        func = ida_funcs.get_func(ea)
+        minea = func.start_ea if func else 0
 
         for _ in range(search_limit):
-            current_ea = ida_bytes.prev_head(current_ea)
+            current_ea = ida_bytes.prev_head(current_ea, minea)
             if current_ea == ida_idaapi.BADADDR:
                 break
 

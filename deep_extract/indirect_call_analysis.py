@@ -485,9 +485,12 @@ def _resolve_register_base_value(ea: int, reg: int, max_depth: Optional[int] = N
         max_depth = constants.MAX_REGISTER_TRACKING_DEPTH
     current_ea = ea
     tracked_reg = reg
+    # Compute lower search bound: function start or a safe fallback
+    func = ida_funcs.get_func(ea)
+    minea = func.start_ea if func else 0
 
     for _ in range(max_depth):
-        current_ea = ida_bytes.prev_head(current_ea)
+        current_ea = ida_bytes.prev_head(current_ea, minea)
         if current_ea == ida_idaapi.BADADDR:
             break
 
@@ -545,9 +548,12 @@ def track_register_loads(ea, target_reg, max_depth=None):
         search_count = 0
         tracked_regs = {target_reg}  # Track all registers that might hold our value
         transform_ops: List[Tuple[str, int]] = []
+        # Compute lower search bound: function start or a safe fallback
+        func = ida_funcs.get_func(ea)
+        minea = func.start_ea if func else 0
         
         while search_count < max_depth:
-            current_ea = ida_bytes.prev_head(current_ea)
+            current_ea = ida_bytes.prev_head(current_ea, minea)
             if current_ea == ida_idaapi.BADADDR:
                 break
                 
@@ -569,7 +575,7 @@ def track_register_loads(ea, target_reg, max_depth=None):
                         tracking_info['potential_targets'].append(target_addr)
                         tracking_info['load_instructions'].append({
                             'address': current_ea,
-                            'instruction': f"mov {ida_ua.print_operand(insn, 0)}, 0x{target_addr:X}",
+                            'instruction': f"mov {ida_ua.print_operand(current_ea, 0)}, 0x{target_addr:X}",
                             'target': target_addr
                         })
                         tracking_info['confidence'] = 'high'
@@ -593,7 +599,7 @@ def track_register_loads(ea, target_reg, max_depth=None):
                         tracking_info['potential_targets'].append(target_addr)
                         tracking_info['load_instructions'].append({
                             'address': current_ea,
-                            'instruction': f"mov {ida_ua.print_operand(insn, 0)}, [{ida_ua.print_operand(insn, 1)}]",
+                            'instruction': f"mov {ida_ua.print_operand(current_ea, 0)}, [{ida_ua.print_operand(current_ea, 1)}]",
                             'target': target_addr,
                             'memory_source': mem_addr
                         })
@@ -611,7 +617,7 @@ def track_register_loads(ea, target_reg, max_depth=None):
                         tracking_info['potential_targets'].append(target_addr)
                         tracking_info['load_instructions'].append({
                             'address': current_ea,
-                            'instruction': f"lea {ida_ua.print_operand(insn, 0)}, {ida_ua.print_operand(insn, 1)}",
+                            'instruction': f"lea {ida_ua.print_operand(current_ea, 0)}, {ida_ua.print_operand(current_ea, 1)}",
                             'target': target_addr
                         })
                         tracking_info['confidence'] = 'high'
@@ -627,7 +633,7 @@ def track_register_loads(ea, target_reg, max_depth=None):
                     
                     tracking_info['load_instructions'].append({
                         'address': current_ea,
-                        'instruction': f"xor {ida_ua.print_operand(insn, 0)}, 0x{insn.Op2.value:X}",
+                        'instruction': f"xor {ida_ua.print_operand(current_ea, 0)}, 0x{insn.Op2.value:X}",
                         'obfuscation': 'xor_key'
                     })
                 
@@ -646,7 +652,7 @@ def track_register_loads(ea, target_reg, max_depth=None):
                     tracked_regs.add(source_reg)
                     tracking_info['load_instructions'].append({
                         'address': current_ea,
-                        'instruction': f"mov {ida_ua.print_operand(insn, 0)}, {ida_ua.print_operand(insn, 1)}",
+                        'instruction': f"mov {ida_ua.print_operand(current_ea, 0)}, {ida_ua.print_operand(current_ea, 1)}",
                         'note': 'register_transfer'
                     })
                 

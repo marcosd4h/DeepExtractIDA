@@ -933,6 +933,32 @@ function Confirm-RequiredPaths {
     Write-Host "IDA databases (.i64) will be stored in: $(Join-Path $StorageDir 'idb_cache')"
 }
 
+$script:TranscriptStarted = $false
+$script:TranscriptPath = $null
+
+function Start-ExecutionTranscript {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$StorageDir
+    )
+    
+    # The batch orchestrator transcript goes in the StorageDir root (alongside
+    # analyzed_modules_list.txt and extraction_report.json), NOT in the logs/
+    # subdirectory which is reserved for per-file IDA analysis logs.
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $logPath = Join-Path $StorageDir "batch_extractor_${timestamp}.log"
+    
+    try {
+        Start-Transcript -Path $logPath -Append -ErrorAction Stop | Out-Null
+        $script:TranscriptStarted = $true
+        $script:TranscriptPath = $logPath
+        Write-Host "Execution log: $logPath" -ForegroundColor Gray
+    }
+    catch {
+        Write-Warning "Failed to start transcript logging: $($_.Exception.Message)"
+    }
+}
+
 $script:ActiveIdaProcesses = [System.Collections.Generic.List[System.Diagnostics.Process]]::new()
 
 # Cleanup function to terminate all active IDA processes
@@ -1352,6 +1378,34 @@ function Start-IDAProcesses {
         Write-Host ""
     }
     
+    # Post-processing: detect empty or suspicious log files
+    # An empty log file typically means IDA crashed before producing any output,
+    # or the process was terminated before the script could run.
+    $emptyLogFiles = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($entry in $processInfo.GetEnumerator()) {
+        $info = $entry.Value
+        if ($info.LogFile -and (Test-Path $info.LogFile -PathType Leaf)) {
+            $logFileInfo = Get-Item $info.LogFile -ErrorAction SilentlyContinue
+            if ($logFileInfo -and $logFileInfo.Length -eq 0) {
+                $emptyLogFiles.Add(@{
+                        FileName = $info.FileName
+                        LogFile  = $info.LogFile
+                        ExitCode = if ($info.ContainsKey('ExitCode')) { $info.ExitCode } else { "unknown" }
+                        Reason   = "Log file is empty - IDA may have crashed before the analysis script ran"
+                    })
+            }
+        }
+    }
+    
+    if ($emptyLogFiles.Count -gt 0) {
+        Write-Warning "Detected $($emptyLogFiles.Count) file(s) with empty IDA log files (possible silent failures):"
+        foreach ($emptyLog in $emptyLogFiles) {
+            $exitInfo = if ($emptyLog.ExitCode -ne "unknown") { " (exit code: $($emptyLog.ExitCode))" } else { "" }
+            Write-Warning "  $([System.IO.Path]::GetFileName($emptyLog.FileName))${exitInfo}: $($emptyLog.LogFile)"
+        }
+        Write-Host ""
+    }
+    
     # Clear global process tracking - all processes have completed
     $script:ActiveIdaProcesses.Clear()
     
@@ -1363,6 +1417,7 @@ function Start-IDAProcesses {
         FailedFiles          = [array]$failedFiles
         TimedOutFiles        = [array]$timedOutFiles
         SkippedFiles         = $skippedFiles
+        EmptyLogFiles        = [array]$emptyLogFiles
         # Use totalFilesAttempted which accurately tracks all files we tried to process
         # (includes successful, failed, timed out; skippedFiles are counted separately as they never started)
         TotalProcessed       = $totalFilesAttempted + $skippedFiles.Count
@@ -1399,6 +1454,7 @@ function Write-ExtractionReport {
     # Safely get counts (handle null arrays)
     $timedOutCount = if ($results.TimedOutFiles) { $results.TimedOutFiles.Count } else { 0 }
     $skippedCount = if ($results.SkippedFiles) { $results.SkippedFiles.Count } else { 0 }
+    $emptyLogCount = if ($results.EmptyLogFiles) { $results.EmptyLogFiles.Count } else { 0 }
     
     $report = @{
         extraction_info        = @{
@@ -1408,16 +1464,18 @@ function Write-ExtractionReport {
             timeout_hours     = $script:IDA_PROCESS_TIMEOUT_SECONDS / 3600
         }
         summary                = @{
-            total_files = $results.TotalProcessed
-            successful  = $results.SuccessfulFiles.Count
-            failed      = $results.FailedFiles.Count
-            timed_out   = $timedOutCount
-            skipped     = $skippedCount
+            total_files     = $results.TotalProcessed
+            successful      = $results.SuccessfulFiles.Count
+            failed          = $results.FailedFiles.Count
+            timed_out       = $timedOutCount
+            skipped         = $skippedCount
+            empty_log_files = $emptyLogCount
         }
         successful_extractions = $results.SuccessfulFiles
         failed_extractions     = $results.FailedFiles
         timed_out_extractions  = $results.TimedOutFiles
         skipped_files          = $results.SkippedFiles
+        empty_log_files        = $results.EmptyLogFiles
     }
     
     # Add PID-specific info if applicable
@@ -1662,6 +1720,9 @@ else {
     Confirm-RequiredPaths -StorageDir $StorageDir
 }
 
+# Start transcript logging after required directories are ensured.
+Start-ExecutionTranscript -StorageDir $StorageDir
+
 # Prepare Analysis Flags
 # These flags are passed to both the checker and the IDA script for consistency.
 $analysisFlags = @{
@@ -1762,3 +1823,13 @@ else {
 
 Write-Host ""
 Write-Host "Script execution completed successfully"
+
+if ($script:TranscriptStarted) {
+    try {
+        Stop-Transcript | Out-Null
+        Write-Host "Execution log saved to: $script:TranscriptPath" -ForegroundColor Gray
+    }
+    catch {
+        Write-Warning "Failed to stop transcript logging cleanly: $($_.Exception.Message)"
+    }
+}

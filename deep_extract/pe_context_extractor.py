@@ -562,15 +562,40 @@ def get_db_connection(db_path, max_retries=720, retry_delay=5, pragmas: Optional
         debug_print(f"ERROR - Failed to access database after {total_minutes:.1f} minutes of attempts: {str(last_error)}")
         raise last_error
 
-def init_common_db(common_db_path: str, pragmas: Optional[Dict[str, Any]] = None) -> bool:
-    """Initializes the common database used to track the analysis status of all files."""
+def init_common_db(common_db_path: str, pragmas: Optional[Dict[str, Any]] = None,
+                   max_retries: int = 30, retry_delay: float = 2.0) -> bool:
+    """Initializes the common database used to track the analysis status of all files.
+    
+    Uses its own retry loop around the DDL statements to handle concurrent access
+    from multiple IDA instances during batch processing.  The previous approach
+    relied on ``get_db_connection()``'s ``@contextmanager``-based retry, but that
+    mechanism cannot recover from statement-level "database is locked" errors
+    (Python's ``@contextmanager`` raises ``RuntimeError`` if the generator tries
+    to ``yield`` a second time after catching a thrown exception).
+    
+    This dedicated retry creates a fresh connection on each attempt so that both
+    connection-level and statement-level lock contention are handled correctly.
+    
+    Args:
+        common_db_path: Path to the common tracking database file.
+        pragmas: Optional dictionary of PRAGMA settings.
+        max_retries: Maximum number of retry attempts (default 30 = ~60 seconds).
+        retry_delay: Seconds to sleep between retries (default 2.0).
+    """
     debug_print(f"TRACE - Starting: init_common_db for {common_db_path}")
-    start_time = time.time()
-    conn = None
-    try:
-        conn = _connect_sqlite(common_db_path, pragmas=pragmas, check_same_thread=False)
-        
-        with conn:
+    overall_start = time.time()
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        conn = None
+        try:
+            conn = _connect_sqlite(
+                common_db_path,
+                pragmas=pragmas,
+                timeout_seconds=20.0,
+                isolation_level="DEFERRED",   # DEFERRED avoids immediate write-lock contention on connect
+                check_same_thread=False,
+            )
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS analyzed_files (
                     file_path TEXT PRIMARY KEY NOT NULL,
@@ -591,24 +616,66 @@ def init_common_db(common_db_path: str, pragmas: Optional[Dict[str, Any]] = None
             conn.execute('CREATE INDEX IF NOT EXISTS idx_an_files_status_lower_name ON analyzed_files(status, LOWER(file_name))')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_an_files_lower_name ON analyzed_files(LOWER(file_name))')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_an_files_lower_ext ON analyzed_files(LOWER(file_extension))')
-        
-        duration = time.time() - start_time
-        debug_print(f"TRACE - Finished: init_common_db. Duration: {duration:.4f}s")
-        return True
-    except Exception as e:
-        debug_print(f"ERROR - Error initializing common database: {str(e)}")
-        return False
-    finally:
-        if conn:
-            conn.close()
+            conn.commit()
+
+            duration = time.time() - overall_start
+            if attempt > 1:
+                debug_print(f"TRACE - init_common_db succeeded after {attempt} attempt(s)")
+            debug_print(f"TRACE - Finished: init_common_db. Duration: {duration:.4f}s")
+            return True
+
+        except sqlite3.OperationalError as e:
+            last_error = e
+            if "database is locked" in str(e) or "database is busy" in str(e):
+                elapsed = time.time() - overall_start
+                debug_print(f"WARNING - Common DB locked during init (attempt {attempt}/{max_retries}, "
+                           f"elapsed {elapsed:.1f}s). Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+            # Non-lock OperationalError -- do not retry
+            debug_print(f"ERROR - Error initializing common database: {str(e)}")
+            return False
+
+        except Exception as e:
+            debug_print(f"ERROR - Error initializing common database: {str(e)}")
+            return False
+
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    # All retries exhausted
+    total_seconds = time.time() - overall_start
+    debug_print(f"ERROR - Failed to initialize common database after {max_retries} attempts "
+               f"({total_seconds:.1f}s): {str(last_error)}")
+    return False
 
 def update_common_db(common_db_path: str, file_info: dict, analysis_db_path: str, analysis_flags: dict,
-                     pragmas: Optional[Dict[str, Any]] = None) -> bool:
-    """Updates the analysis status of a file in the common tracking database to 'COMPLETE'."""
+                     pragmas: Optional[Dict[str, Any]] = None,
+                     max_retries: int = 30, retry_delay: float = 2.0) -> bool:
+    """Updates the analysis status of a file in the common tracking database to 'COMPLETE'.
+    
+    Uses its own retry loop (same rationale as ``init_common_db``) to handle
+    statement-level "database is locked" errors that the ``@contextmanager``-based
+    retry in ``get_db_connection`` cannot recover from.
+    """
     debug_print(f"TRACE - Starting: update_common_db for {file_info.get('file_path')}")
-    start_time = time.time()
-    try:
-        with get_db_connection(common_db_path, pragmas=pragmas) as conn:
+    overall_start = time.time()
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        conn = None
+        try:
+            conn = _connect_sqlite(
+                common_db_path,
+                pragmas=pragmas,
+                timeout_seconds=20.0,
+                isolation_level="DEFERRED",
+                check_same_thread=False,
+            )
             cursor = conn.cursor()
             cursor.execute('''
                 UPDATE analyzed_files 
@@ -630,13 +697,40 @@ def update_common_db(common_db_path: str, file_info: dict, analysis_db_path: str
                 file_info.get('file_path')
             ))
             conn.commit()
-        
-        duration = time.time() - start_time
-        debug_print(f"TRACE - Finished: update_common_db. Duration: {duration:.4f}s")
-        return True
-    except Exception as e:
-        debug_print(f"ERROR - Error updating common database: {str(e)}")
-        return False
+
+            duration = time.time() - overall_start
+            if attempt > 1:
+                debug_print(f"TRACE - update_common_db succeeded after {attempt} attempt(s)")
+            debug_print(f"TRACE - Finished: update_common_db. Duration: {duration:.4f}s")
+            return True
+
+        except sqlite3.OperationalError as e:
+            last_error = e
+            if "database is locked" in str(e) or "database is busy" in str(e):
+                elapsed = time.time() - overall_start
+                debug_print(f"WARNING - Common DB locked during update (attempt {attempt}/{max_retries}, "
+                           f"elapsed {elapsed:.1f}s). Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+            debug_print(f"ERROR - Error updating common database: {str(e)}")
+            return False
+
+        except Exception as e:
+            debug_print(f"ERROR - Error updating common database: {str(e)}")
+            return False
+
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    # All retries exhausted
+    total_seconds = time.time() - overall_start
+    debug_print(f"ERROR - Failed to update common database after {max_retries} attempts "
+               f"({total_seconds:.1f}s): {str(last_error)}")
+    return False
 
 def parse_arguments() -> Optional[dict]:
     """
@@ -696,26 +790,47 @@ def validate_arguments(args: Optional[dict]) -> Optional[dict]:
            
     return args
 
-def prepare_for_analysis(input_file_path, common_db_path, current_args, current_hashes, pragmas: Optional[Dict[str, Any]] = None):
-    """Checks if a file needs to be analyzed and locks it in the common database."""
+def prepare_for_analysis(input_file_path, common_db_path, current_args, current_hashes,
+                         pragmas: Optional[Dict[str, Any]] = None,
+                         max_retries: int = 30, retry_delay: float = 2.0):
+    """Checks if a file needs to be analyzed and locks it in the common database.
+    
+    Uses its own retry loop (same rationale as ``init_common_db``) for write
+    operations to handle concurrent "database is locked" errors correctly.
+    
+    Returns:
+        True:  File needs analysis and has been locked.
+        False: File does not need analysis (already analyzed, in progress, etc.) -- skip.
+        None:  An error occurred -- caller should treat as failure.
+    """
     debug_print(f"TRACE - Starting: prepare_for_analysis for {input_file_path}")
-    start_time = time.time()
-    try:
-        if current_args.get('force_reanalyze'):
-            debug_print("Forcing re-analysis as per user request. Will attempt to lock file.")
+    overall_start = time.time()
+    last_error: Optional[Exception] = None
 
-        current_flags = json.dumps(current_args, sort_keys=True)
+    if current_args.get('force_reanalyze'):
+        debug_print("Forcing re-analysis as per user request. Will attempt to lock file.")
 
-        with get_db_connection(common_db_path, pragmas=pragmas) as conn:
+    current_flags = json.dumps(current_args, sort_keys=True)
+
+    for attempt in range(1, max_retries + 1):
+        conn = None
+        try:
+            conn = _connect_sqlite(
+                common_db_path,
+                pragmas=pragmas,
+                timeout_seconds=20.0,
+                isolation_level="DEFERRED",
+                check_same_thread=False,
+            )
             cursor = conn.cursor()
-            
+
             cursor.execute('''
                 SELECT status, md5_hash, sha256_hash, analysis_flags, analysis_db_path, analysis_start_timestamp
                 FROM analyzed_files
                 WHERE file_path = ?
             ''', (input_file_path,))
             result = cursor.fetchone()
-            
+
             needs_analysis = False
             reason = ""
 
@@ -725,7 +840,7 @@ def prepare_for_analysis(input_file_path, common_db_path, current_args, current_
             else:
                 status, stored_md5, stored_sha256, stored_flags, stored_db_path, start_time_str = result
                 current_args_norm = {k: v for k, v in current_args.items() if k != 'force_reanalyze'}
-                
+
                 if current_args.get('force_reanalyze'):
                     needs_analysis = True
                     reason = "Forcing re-analysis via command-line flag."
@@ -734,7 +849,7 @@ def prepare_for_analysis(input_file_path, common_db_path, current_args, current_
                         try:
                             lock_time = datetime.strptime(start_time_str.split('.')[0], '%Y-%m-%d %H:%M:%S')
                             lock_age_hours = (datetime.now() - lock_time).total_seconds() / 3600
-                            
+
                             if lock_age_hours > 3.0:
                                 needs_analysis = True
                                 reason = f"Stale lock found (locked for {lock_age_hours:.1f} hours). Taking over."
@@ -782,19 +897,47 @@ def prepare_for_analysis(input_file_path, common_db_path, current_args, current_
                     stored_db_path if result else None
                 ))
                 conn.commit()
-                duration = time.time() - start_time
+                duration = time.time() - overall_start
+                if attempt > 1:
+                    debug_print(f"TRACE - prepare_for_analysis succeeded after {attempt} attempt(s)")
                 debug_print(f"TRACE - Finished: prepare_for_analysis (needed analysis). Duration: {duration:.4f}s")
                 return True
             else:
                 debug_print("File already analyzed and is up to date. Skipping analysis.")
-                duration = time.time() - start_time
+                duration = time.time() - overall_start
                 debug_print(f"TRACE - Finished: prepare_for_analysis (skipped). Duration: {duration:.4f}s")
                 return False
 
-    except Exception as e:
-        debug_print(f"ERROR - Error during analysis preparation: {str(e)}. Aborting analysis.")
-        debug_print(traceback.format_exc())
-        return False
+        except sqlite3.OperationalError as e:
+            last_error = e
+            if "database is locked" in str(e) or "database is busy" in str(e):
+                elapsed = time.time() - overall_start
+                debug_print(f"WARNING - Common DB locked during prepare_for_analysis "
+                           f"(attempt {attempt}/{max_retries}, elapsed {elapsed:.1f}s). "
+                           f"Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+            debug_print(f"ERROR - Error during analysis preparation: {str(e)}. Aborting analysis.")
+            debug_print(traceback.format_exc())
+            return None
+
+        except Exception as e:
+            debug_print(f"ERROR - Error during analysis preparation: {str(e)}. Aborting analysis.")
+            debug_print(traceback.format_exc())
+            return None
+
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    # All retries exhausted
+    total_seconds = time.time() - overall_start
+    debug_print(f"ERROR - Failed to prepare for analysis after {max_retries} attempts "
+               f"({total_seconds:.1f}s): {str(last_error)}. Aborting analysis.")
+    return None
 
 def _init_profile_stats() -> Dict[str, Any]:
     return {
@@ -1257,21 +1400,33 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         debug_print(traceback.format_exc())
         return functions_processed_count > 0
 
-def handle_database_setup(config: AnalysisConfig) -> bool:
-    """Initializes databases and checks if analysis should proceed."""
+def handle_database_setup(config: AnalysisConfig) -> Optional[bool]:
+    """Initializes databases and checks if analysis should proceed.
+    
+    Returns:
+        True:  Databases initialized and file locked for analysis -- proceed.
+        False: File does not need analysis (already analyzed) -- skip gracefully.
+        None:  An error occurred during setup -- caller should return failure exit code.
+    """
     extractor_core.debug_print(f"TRACE - Starting: handle_database_setup")
     try:
         if not init_common_db(str(config.common_db_path), pragmas=config.get_common_db_pragmas()):
             extractor_core.debug_print("ERROR - Failed to initialize common database. Aborting.")
-            return False
+            return None
         
-        if not prepare_for_analysis(
+        prepare_result = prepare_for_analysis(
             str(config.input_file_path),
             str(config.common_db_path),
             config.to_dict(),
             config.file_hashes,
             pragmas=config.get_common_db_pragmas(),
-        ):
+        )
+        if prepare_result is None:
+            # Error occurred during preparation
+            extractor_core.debug_print("ERROR - Analysis preparation failed. Aborting.")
+            return None
+        if prepare_result is False:
+            # File already analyzed -- not an error, just skip
             extractor_core.debug_print("File does not require analysis. Skipping.")
             return False
         
@@ -1281,12 +1436,12 @@ def handle_database_setup(config: AnalysisConfig) -> bool:
             pragmas=config.get_sqlite_pragmas(),
         ):
             extractor_core.debug_print("ERROR - Failed to initialize SQLite database")
-            return False
+            return None
         
         return True
     except Exception as e:
         extractor_core.debug_print(f"ERROR - Error in handle_database_setup: {str(e)}")
-        return False
+        return None
 
 def build_file_info_dict(config: AnalysisConfig, pe_data: Dict[str, Any]) -> Dict[str, Any]:
     """Builds the file_info dictionary for database storage."""
@@ -1450,7 +1605,13 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
             file_hashes = {'md5': None, 'sha256': None}
         config.file_hashes = file_hashes
         
-        if not handle_database_setup(config):
+        setup_result = handle_database_setup(config)
+        if setup_result is None:
+            # Genuine error (database locked, init failure, etc.) -- report failure
+            debug_print("ERROR - Database setup failed. Exiting with error.")
+            return 1
+        if setup_result is False:
+            # File already analyzed, no work needed -- not an error
             return 0
         
         # Track IDA auto-analysis time
