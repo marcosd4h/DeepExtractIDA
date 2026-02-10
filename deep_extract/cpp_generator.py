@@ -113,6 +113,7 @@ class CppGenerator:
         standalone_functions_data = []
         cpp_files_generated = 0
         md_files_generated = 0
+        missing_signature_count = 0
         
         # Process and categorize functions
         for func_row in processed_funcs:
@@ -124,9 +125,14 @@ class CppGenerator:
             mangled_name = func_row['mangled_name'] if 'mangled_name' in row_keys else None
             decompiled_code = func_row['decompiled_code']  # This is our C++ source
             
-            if not original_name or not original_signature or not decompiled_code:
+            if not original_name or not decompiled_code:
                 debug_print(f"WARNING - Skipping entry with missing data: Name='{original_name}'")
                 continue
+
+            # Allow missing signatures: fall back to extended signature or name.
+            effective_signature = original_signature or signature_extended or original_name
+            if not original_signature:
+                missing_signature_count += 1
             
             # Skip functions where decompilation failed
             if decompiled_code.startswith("Decompilation failed:") or decompiled_code == "Decompiler not available":
@@ -147,17 +153,22 @@ class CppGenerator:
                 class_name = match.group(1)
                 method_name = match.group(2)
                 class_methods_data.append(
-                    (class_name, method_name, original_name, original_signature,
+                    (class_name, method_name, original_name, effective_signature,
                      signature_extended, mangled_name, actual_cpp_code)
                 )
             else:
                 standalone_functions_data.append(
-                    (original_name, original_signature, signature_extended,
+                    (original_name, effective_signature, signature_extended,
                      mangled_name, actual_cpp_code)
                 )
         
         debug_print(f"Identified {len(class_methods_data)} class methods and "
                    f"{len(standalone_functions_data)} standalone functions.")
+        if missing_signature_count:
+            debug_print(
+                f"WARNING - {missing_signature_count} functions missing signatures; "
+                "used extended signature or function name as fallback."
+            )
         
         # Generate class method files
         cpp_count = self._generate_class_method_files(class_methods_data)
