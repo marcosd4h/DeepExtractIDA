@@ -1827,6 +1827,19 @@ Write-Host "Script execution completed successfully"
 if ($script:TranscriptStarted) {
     try {
         Stop-Transcript | Out-Null
+
+        # Strip the automatic PowerShell transcript header and footer from the
+        # log file so the output reads like a plain execution log.
+        if (Test-Path $script:TranscriptPath) {
+            $raw = Get-Content $script:TranscriptPath -Raw
+            # Remove trailing transcript-end block
+            $raw = $raw -replace '(?s)\*{22}\r?\nWindows PowerShell transcript end\r?\nEnd time: [^\r\n]+\r?\n\*{22}\r?\n?\s*$', ''
+            # Remove leading transcript-start block (everything up to and
+            # including the closing row of asterisks)
+            $raw = $raw -replace '(?s)^\*{22}\r?\nWindows PowerShell transcript start\r?\n.*?\*{22}\r?\n', ''
+            [System.IO.File]::WriteAllText($script:TranscriptPath, $raw.TrimEnd() + [Environment]::NewLine)
+        }
+
         Write-Host "Execution log saved to: $script:TranscriptPath" -ForegroundColor Gray
     }
     catch {
