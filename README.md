@@ -17,6 +17,13 @@ By converting unstructured data into a queryable schema, this tool facilitates:
 - **AI-Native Code Review:** Export sanitized decompiled code to C++ for analysis in **Claude Code**, **Cursor**, or **Codex**, enabling LLMs to process function logic and data-flow invariants without the volume of unprocessed disassembly.
 - **Large-Scale Threat Hunting:** Automate the analysis of binaries to identify cross-ecosystem vulnerability patterns, insecure API usage, and structural characteristics.
 
+## Documentation
+
+Detailed technical references for the extraction formats and database schemas are available in the `docs/` directory:
+
+- [**Data Format Reference**](docs/data_format_reference.md): Technical specification of the SQLite schema, data architecture, and analysis heuristics.
+- [**Analysis Metadata and Reports Reference**](docs/file_info_format_reference.md): Technical specification of the generated `file_info.md`, `file_info.json`, and C++ code output structure.
+
 ## Use Cases
 
 The primary purpose of DeepExtract is to extract structured data from PE binaries to support specialized research workflows. The following use cases demonstrate the application of this data in automated and interactive research. Detailed documentation for each case is **pending** and will be released in the coming days.
@@ -357,7 +364,10 @@ The interactive mode provides a configuration interface for:
 
 ## Output Architecture
 
-For a comprehensive technical reference of the data architecture, schemas, and analysis heuristics, see the [Data Format Reference](docs/data_format_reference.md).
+The results are stored in a structured format designed for both human review and automated analysis. For a comprehensive technical reference of the data architecture, SQLite schemas, and analysis reports, see:
+
+- [**Data Format Reference**](docs/data_format_reference.md) (Database & Heuristics)
+- [**Analysis Metadata and Reports Reference**](docs/file_info_format_reference.md) (Markdown & JSON Reports)
 
 The results are stored in two primary relational tables within the SQLite database.
 
@@ -386,6 +396,8 @@ The core table containing granular data for every function in the binary:
 ### Directory: `extracted_raw_code/` (Optional)
 
 If `--generate-cpp` is used, the tool creates a folder structure containing **one individual `.cpp` file per function**. Additionally, it generates a **single Markdown file per module** (`file_info.md`) that serves as a high-level index and technical report for the binary.
+
+For more details on the report structure and C++ generation, see the [Analysis Metadata and Reports Reference](docs/file_info_format_reference.md).
 
 ## Technical Requirements
 
