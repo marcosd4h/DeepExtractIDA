@@ -33,6 +33,13 @@ class CppGenerator:
     # Windows MAX_PATH is 260 (including null terminator), so 259 usable chars.
     # We reserve room for separator + extension + counter suffix ("_123.cpp" = 8).
     WINDOWS_MAX_PATH = 259
+    
+    # Target line range for grouped standalone function files
+    STANDALONE_GROUP_TARGET_LINES = 300
+    STANDALONE_GROUP_MIN_LINES = 250
+    # Target line range for grouped class method files
+    CLASS_GROUP_TARGET_LINES = STANDALONE_GROUP_TARGET_LINES
+    CLASS_GROUP_MIN_LINES = STANDALONE_GROUP_MIN_LINES
 
     @staticmethod
     def sanitize_filename(name: str) -> str:
@@ -211,46 +218,80 @@ class CppGenerator:
     
     def _generate_class_method_files(self, class_methods_data: List[tuple]) -> int:
         """Generate files for class methods."""
+        if not class_methods_data:
+            debug_print("No class methods found to generate files for.")
+            return 0
+
         cpp_files_generated = 0
         used_filenames = set()
         
-        debug_print(f"Generating C++ files for {len(class_methods_data)} class methods...")
-        
-        for class_name, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str in sorted(
-            class_methods_data,
-            key=lambda item: (item[0], item[1], item[2])
-        ):
+        debug_print(
+            "Generating grouped C++ files for "
+            f"{len(class_methods_data)} class methods "
+            f"(target {self.CLASS_GROUP_MIN_LINES}-{self.CLASS_GROUP_TARGET_LINES} lines)..."
+        )
+
+        methods_by_class = {}
+        for class_name, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str in class_methods_data:
+            methods_by_class.setdefault(class_name, []).append(
+                (class_name, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str)
+            )
+
+        for class_name, class_methods in sorted(methods_by_class.items(), key=lambda item: item[0]):
             sanitized_class_name = self.sanitize_filename(class_name)
-            sanitized_method_name = self.sanitize_filename(method_name)
-            
-            # Generate unique filename, capping total length to avoid OS path limits
-            # Pass output_dir so the cap accounts for the full path on Windows (MAX_PATH=260)
-            base_filename = self._cap_filename_length(
-                f"{self.module_name}_{sanitized_class_name}_{sanitized_method_name}",
-                output_dir=self.output_dir,
-            )
-            output_filename = f"{base_filename}.cpp"
-            counter = 1
-            while (self.output_dir / output_filename) in used_filenames:
-                output_filename = f"{base_filename}_{counter}.cpp"
-                counter += 1
-            
-            class_method_path = self.output_dir / output_filename
-            used_filenames.add(class_method_path)
-            
-            # Write C++ file
-            debug_print(f"TRACE - Writing class method '{class_name}::{method_name}' to {class_method_path}")
-            self._write_cpp_file(
-                class_method_path,
-                signature,
-                cpp_code_str,
-                function_name=original_name,
-                mangled_name=mangled_name,
-                signature_extended=signature_extended
-            )
-            cpp_files_generated += 1
-        
-        debug_print("Generated C++ files for class methods.")
+            sorted_methods = sorted(class_methods, key=lambda item: (item[1], item[2]))
+
+            grouped_methods = []
+            current_group = []
+            current_lines = 0
+
+            for _, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str in sorted_methods:
+                estimated_lines = self._estimate_function_lines(
+                    signature,
+                    cpp_code_str,
+                    function_name=original_name,
+                    mangled_name=mangled_name,
+                    signature_extended=signature_extended
+                )
+
+                if not current_group:
+                    current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                    current_lines = estimated_lines
+                    continue
+
+                if current_lines + estimated_lines > self.CLASS_GROUP_TARGET_LINES:
+                    grouped_methods.append(current_group)
+                    current_group = [(original_name, signature, signature_extended, mangled_name, cpp_code_str)]
+                    current_lines = estimated_lines
+                else:
+                    current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                    current_lines += estimated_lines
+
+            if current_group:
+                grouped_methods.append(current_group)
+
+            for group_index, group in enumerate(grouped_methods, start=1):
+                base_filename = self._cap_filename_length(
+                    f"{self.module_name}_{sanitized_class_name}_group_{group_index}",
+                    output_dir=self.output_dir,
+                )
+                output_filename = f"{base_filename}.cpp"
+                counter = 1
+                while (self.output_dir / output_filename) in used_filenames:
+                    output_filename = f"{base_filename}_{counter}.cpp"
+                    counter += 1
+
+                class_method_path = self.output_dir / output_filename
+                used_filenames.add(class_method_path)
+
+                debug_print(
+                    f"TRACE - Writing class method group {group_index} "
+                    f"for class '{class_name}' ({len(group)} methods) to {class_method_path}"
+                )
+                self._write_grouped_cpp_file(class_method_path, group)
+                cpp_files_generated += 1
+
+        debug_print("Generated grouped C++ files for class methods.")
         return cpp_files_generated
     
     def _generate_standalone_function_files(self, standalone_functions_data: List[tuple]) -> int:
@@ -262,19 +303,46 @@ class CppGenerator:
         cpp_files_generated = 0
         used_filenames = set()
         
-        debug_print(f"Generating individual C++ files for {len(standalone_functions_data)} standalone functions...")
-        
+        debug_print(
+            "Generating grouped C++ files for "
+            f"{len(standalone_functions_data)} standalone functions "
+            f"(target {self.STANDALONE_GROUP_MIN_LINES}-{self.STANDALONE_GROUP_TARGET_LINES} lines)..."
+        )
+
         sorted_standalone = sorted(standalone_functions_data, key=lambda item: (item[0], item[1]))
-        
+
+        grouped_functions = []
+        current_group = []
+        current_lines = 0
+
         for original_name, signature, signature_extended, mangled_name, cpp_code_str in sorted_standalone:
-            sanitized_func_name = self.sanitize_filename(original_name)
-            if not sanitized_func_name:
-                sanitized_func_name = "unnamed_standalone_function"
-            
-            # Generate unique filename, capping total length to avoid OS path limits
-            # Pass output_dir so the cap accounts for the full path on Windows (MAX_PATH=260)
+            estimated_lines = self._estimate_function_lines(
+                signature,
+                cpp_code_str,
+                function_name=original_name,
+                mangled_name=mangled_name,
+                signature_extended=signature_extended
+            )
+
+            if not current_group:
+                current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                current_lines = estimated_lines
+                continue
+
+            if current_lines + estimated_lines > self.STANDALONE_GROUP_TARGET_LINES:
+                grouped_functions.append(current_group)
+                current_group = [(original_name, signature, signature_extended, mangled_name, cpp_code_str)]
+                current_lines = estimated_lines
+            else:
+                current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                current_lines += estimated_lines
+
+        if current_group:
+            grouped_functions.append(current_group)
+
+        for group_index, group in enumerate(grouped_functions, start=1):
             base_filename = self._cap_filename_length(
-                f"{self.module_name}_standalone_{sanitized_func_name}",
+                f"{self.module_name}_standalone_group_{group_index}",
                 output_dir=self.output_dir,
             )
             output_filename = f"{base_filename}.cpp"
@@ -282,25 +350,121 @@ class CppGenerator:
             while (self.output_dir / output_filename) in used_filenames:
                 output_filename = f"{base_filename}_{counter}.cpp"
                 counter += 1
-            
+
             standalone_file_path = self.output_dir / output_filename
             used_filenames.add(standalone_file_path)
-            
-            # Write C++ file
-            debug_print(f"TRACE - Writing standalone function '{original_name}' to {standalone_file_path}")
-            self._write_cpp_file(
-                standalone_file_path,
-                signature,
-                cpp_code_str,
-                function_name=original_name,
-                mangled_name=mangled_name,
-                signature_extended=signature_extended
+
+            debug_print(
+                f"TRACE - Writing standalone group {group_index} "
+                f"({len(group)} functions) to {standalone_file_path}"
             )
+            self._write_grouped_cpp_file(standalone_file_path, group)
             cpp_files_generated += 1
-        
-        debug_print("Generated C++ files for standalone functions.")
+
+        debug_print("Generated grouped C++ files for standalone functions.")
         return cpp_files_generated
     
+    @staticmethod
+    def _build_function_header_lines(signature: str, function_name: Optional[str] = None,
+                                     mangled_name: Optional[str] = None,
+                                     signature_extended: Optional[str] = None) -> List[str]:
+        header_lines = []
+        if function_name:
+            header_lines.append(f"// Function Name: {function_name}")
+        if mangled_name:
+            header_lines.append(f"// Mangled Name: {mangled_name}")
+        if signature_extended and signature_extended != signature:
+            header_lines.append(f"// Function Signature (Extended): {signature_extended}")
+        header_lines.append(f"// Function Signature: {signature}")
+        return header_lines
+
+    @staticmethod
+    def _wrap_cpp_code_lines(cpp_code: str) -> List[str]:
+        # Process and wrap the C++ code (comments and string literals only)
+        processed_cpp = cpp_code.replace("\\n", "\n").replace("`", "'").strip()
+        wrapped_cpp_lines = []
+        in_multiline_comment = False
+
+        for line in processed_cpp.splitlines():
+            # Check if we're entering or in a multi-line comment
+            if '/*' in line and not in_multiline_comment:
+                in_multiline_comment = True
+
+            # Check if this is a comment line
+            stripped = line.strip()
+            if stripped.startswith('//') or in_multiline_comment:
+                # Comment line - wrap it
+                indent = len(line) - len(line.lstrip())
+                indent_str = line[:indent]
+
+                if len(line) > 120 and not stripped.startswith('//'):
+                    # Multi-line comment content - wrap but preserve structure
+                    wrapped_cpp_lines.append(line)
+                elif stripped.startswith('//'):
+                    # Single-line comment
+                    comment_content = stripped[2:].strip()
+
+                    if len(line) > 120:
+                        wrapped = textwrap.wrap(comment_content, width=120 - indent - 3,
+                                              break_long_words=False,
+                                              replace_whitespace=False,
+                                              break_on_hyphens=False)
+                        for wrapped_line in wrapped:
+                            wrapped_cpp_lines.append(f"{indent_str}// {wrapped_line}")
+                    else:
+                        wrapped_cpp_lines.append(line)
+                else:
+                    wrapped_cpp_lines.append(line)
+            elif len(line) > 120:
+                # Long non-comment line - keep as is to avoid breaking code
+                debug_print(f"TRACE - Long line ({len(line)} chars) in C++ code kept as-is to preserve functionality")
+                wrapped_cpp_lines.append(line)
+            else:
+                # Regular code line - keep as is
+                wrapped_cpp_lines.append(line)
+
+            # Check if we're exiting a multi-line comment
+            if '*/' in line and in_multiline_comment:
+                in_multiline_comment = False
+
+        return wrapped_cpp_lines
+
+    def _estimate_function_lines(self, signature: str, cpp_code: str, function_name: Optional[str] = None,
+                                 mangled_name: Optional[str] = None,
+                                 signature_extended: Optional[str] = None) -> int:
+        header_lines = self._build_function_header_lines(
+            signature,
+            function_name=function_name,
+            mangled_name=mangled_name,
+            signature_extended=signature_extended
+        )
+        code_lines = self._wrap_cpp_code_lines(cpp_code)
+        trailing_blank_line = 1
+        return len(header_lines) + len(code_lines) + trailing_blank_line
+
+    def _write_grouped_cpp_file(self, file_path: pathlib.Path, grouped_functions: List[tuple]) -> None:
+        """Write a grouped C++ source file for standalone functions."""
+        safe_path = self._long_path(file_path)
+        with open(safe_path, 'w', encoding='utf-8') as f:
+            for index, (function_name, signature, signature_extended, mangled_name, cpp_code) in enumerate(grouped_functions):
+                header_lines = self._build_function_header_lines(
+                    signature,
+                    function_name=function_name,
+                    mangled_name=mangled_name,
+                    signature_extended=signature_extended
+                )
+                f.write("\n".join(header_lines) + "\n")
+
+                wrapped_cpp_lines = self._wrap_cpp_code_lines(cpp_code)
+                if wrapped_cpp_lines:
+                    f.write("\n".join(wrapped_cpp_lines))
+                    f.write("\n")
+                else:
+                    f.write("\n")
+
+                if index != len(grouped_functions) - 1:
+                    f.write("\n")
+
     def _write_cpp_file(self, file_path: pathlib.Path, signature: str, 
                        cpp_code: str, function_name: Optional[str] = None,
                        mangled_name: Optional[str] = None,
@@ -309,65 +473,15 @@ class CppGenerator:
         # Use long-path prefix on Windows to avoid MAX_PATH failures
         safe_path = self._long_path(file_path)
         with open(safe_path, 'w', encoding='utf-8') as f:
-            header_lines = []
-            if function_name:
-                header_lines.append(f"// Function Name: {function_name}")
-            if mangled_name:
-                header_lines.append(f"// Mangled Name: {mangled_name}")
-            if signature_extended and signature_extended != signature:
-                header_lines.append(f"// Function Signature (Extended): {signature_extended}")
-            header_lines.append(f"// Function Signature: {signature}")
-            f.write("\n".join(header_lines) + "\n\n")
+            header_lines = self._build_function_header_lines(
+                signature,
+                function_name=function_name,
+                mangled_name=mangled_name,
+                signature_extended=signature_extended
+            )
+            f.write("\n".join(header_lines) + "\n")
             
-            # Process and write the C++ code
-            processed_cpp = cpp_code.replace("\\n", "\n").replace("`", "'").strip()
-            
-            # Wrap long lines in the C++ code (comments and string literals only)
-            wrapped_cpp_lines = []
-            in_multiline_comment = False
-            
-            for line in processed_cpp.splitlines():
-                # Check if we're entering or in a multi-line comment
-                if '/*' in line and not in_multiline_comment:
-                    in_multiline_comment = True
-                
-                # Check if this is a comment line
-                stripped = line.strip()
-                if stripped.startswith('//') or in_multiline_comment:
-                    # Comment line - wrap it
-                    indent = len(line) - len(line.lstrip())
-                    indent_str = line[:indent]
-                    
-                    if len(line) > 120 and not stripped.startswith('//'):
-                        # Multi-line comment content - wrap but preserve structure
-                        wrapped_cpp_lines.append(line)
-                    elif stripped.startswith('//'):
-                        # Single-line comment
-                        comment_content = stripped[2:].strip()
-                        
-                        if len(line) > 120:
-                            wrapped = textwrap.wrap(comment_content, width=120 - indent - 3,
-                                                  break_long_words=False,
-                                                  replace_whitespace=False,
-                                                  break_on_hyphens=False)
-                            for i, wrapped_line in enumerate(wrapped):
-                                wrapped_cpp_lines.append(f"{indent_str}// {wrapped_line}")
-                        else:
-                            wrapped_cpp_lines.append(line)
-                    else:
-                        wrapped_cpp_lines.append(line)
-                elif len(line) > 120:
-                    # Long non-comment line - keep as is to avoid breaking code
-                    debug_print(f"TRACE - Long line ({len(line)} chars) in C++ code kept as-is to preserve functionality")
-                    wrapped_cpp_lines.append(line)
-                else:
-                    # Regular code line - keep as is
-                    wrapped_cpp_lines.append(line)
-                
-                # Check if we're exiting a multi-line comment
-                if '*/' in line and in_multiline_comment:
-                    in_multiline_comment = False
-            
+            wrapped_cpp_lines = self._wrap_cpp_code_lines(cpp_code)
             f.write("\n".join(wrapped_cpp_lines))
             f.write("\n")
     

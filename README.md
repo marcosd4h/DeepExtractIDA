@@ -395,7 +395,10 @@ The core table containing granular data for every function in the binary:
 
 ### Directory: `extracted_raw_code/` (Optional)
 
-If `--generate-cpp` is used, the tool creates a folder structure containing **one individual `.cpp` file per function**. Additionally, it generates a **single Markdown file per module** (`file_info.md`) that serves as a high-level index and technical report for the binary.
+If `--generate-cpp` is used, the tool creates a folder structure with generated C++ files and a **single Markdown file per module** (`file_info.md`) that serves as a high-level index and technical report for the binary.
+
+- **Class methods:** Grouped by class into combined files of about **250–300 lines** each. Files are named `{module}_{class}_group_1.cpp`, `{module}_{class}_group_2.cpp`, etc. Methods are packed in alphabetical order; each method is preceded by a comment block with its name and signature.
+- **Standalone functions:** Grouped into combined files of about **250–300 lines** each to reduce file count. Files are named `{module}_standalone_group_1.cpp`, `{module}_standalone_group_2.cpp`, etc. Functions are packed in alphabetical order; each function in a grouped file is preceded by a comment block with its name and signature.
 
 For more details on the report structure and C++ generation, see the [Analysis Metadata and Reports Reference](docs/file_info_format_reference.md).
 
