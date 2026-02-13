@@ -230,7 +230,6 @@ function Show-Help {
     Write-Host ""
     Write-Host "OUTPUT STRUCTURE:" -ForegroundColor Yellow
     Write-Host "  <storageDir>/"
-    Write-Host "    +-- analyzed_modules_list.txt  List of files analyzed"
     Write-Host "    +-- extraction_report.json     Summary report"
     Write-Host "    +-- extracted_dbs/           SQLite analysis databases"
     Write-Host "    +-- extracted_code/          Generated C++ code"
@@ -942,11 +941,9 @@ function Start-ExecutionTranscript {
         [string]$StorageDir
     )
     
-    # The batch orchestrator transcript goes in the StorageDir root (alongside
-    # analyzed_modules_list.txt and extraction_report.json), NOT in the logs/
-    # subdirectory which is reserved for per-file IDA analysis logs.
     $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $logPath = Join-Path $StorageDir "batch_extractor_${timestamp}.log"
+    $logsDir = Join-Path $StorageDir "logs"
+    $logPath = Join-Path $logsDir "batch_extractor_${timestamp}.log"
     
     try {
         Start-Transcript -Path $logPath -Append -ErrorAction Stop | Out-Null
@@ -1778,11 +1775,6 @@ if ($script:downloadSymbolsEnabled -and $files.Count -gt 0) {
 }
 
 if ($files.Count -gt 0) {
-    # Export the list of files that will be analyzed to analyzed_modules_list.txt
-    $analyzedListPath = Join-Path $StorageDir "analyzed_modules_list.txt"
-    $files | ForEach-Object { $_.FullName } | Out-File -FilePath $analyzedListPath -Encoding UTF8
-    Write-Host "Analyzed modules list exported to: $analyzedListPath"
-    
     try {
         $results = Start-IDAProcesses `
             -files $files `
