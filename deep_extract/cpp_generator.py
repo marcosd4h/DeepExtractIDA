@@ -41,6 +41,31 @@ class CppGenerator:
     CLASS_GROUP_TARGET_LINES = STANDALONE_GROUP_TARGET_LINES
     CLASS_GROUP_MIN_LINES = STANDALONE_GROUP_MIN_LINES
 
+    # Known library/runtime patterns for tagging boilerplate functions.
+    # Checked against both the display name and mangled name.
+    # Format: (substring, tag_label)
+    _LIBRARY_PATTERNS = [
+        # WIL - Windows Implementation Library (wil:: and wistd:: namespaces)
+        ("wil::", "WIL"),
+        ("wistd::", "WIL"),
+        ("@wil@@", "WIL"),          # mangled namespace marker
+        ("@wistd@@", "WIL"),        # mangled namespace marker
+        # STL / standard library
+        ("std::", "STL"),
+        ("stdext::", "STL"),
+        ("@std@@", "STL"),
+        ("@stdext@@", "STL"),
+        # WRL - Windows Runtime C++ Template Library
+        ("Microsoft::WRL::", "WRL"),
+        # CRT - C/C++ runtime startup and support
+        ("__scrt_", "CRT"),
+        ("__acrt_", "CRT"),
+        ("_CRT_", "CRT"),
+        # ETW - Event Tracing / TraceLogging instrumentation
+        ("_tlgWrite", "ETW/TraceLogging"),
+        ("TraceLoggingCorrelationVector::", "ETW/TraceLogging"),
+    ]
+
     @staticmethod
     def sanitize_filename(name: str) -> str:
         """Sanitizes a string to be a valid filename component."""
@@ -114,6 +139,7 @@ class CppGenerator:
         cpp_files_generated = 0
         md_files_generated = 0
         missing_signature_count = 0
+        function_index: dict = {}
         
         # Process and categorize functions
         for func_row in processed_funcs:
@@ -171,12 +197,26 @@ class CppGenerator:
             )
         
         # Generate class method files
-        cpp_count = self._generate_class_method_files(class_methods_data)
+        cpp_count, class_index = self._generate_class_method_files(class_methods_data)
         cpp_files_generated += cpp_count
+        for name, entry in class_index.items():
+            function_index[name] = entry
         
         # Generate standalone function files
-        cpp_count = self._generate_standalone_function_files(standalone_functions_data)
+        cpp_count, standalone_index = self._generate_standalone_function_files(standalone_functions_data)
         cpp_files_generated += cpp_count
+        for name, entry in standalone_index.items():
+            if name in function_index:
+                debug_print(
+                    f"WARNING - Duplicate function name '{name}' found in "
+                    f"{function_index[name]['file']} and {entry['file']}. "
+                    "Keeping the first occurrence."
+                )
+                continue
+            function_index[name] = entry
+
+        if function_index:
+            self._write_function_index(function_index)
         
         return cpp_files_generated, md_files_generated
     
@@ -227,14 +267,15 @@ class CppGenerator:
         
         return cpp_files_generated, md_files_generated, report_files_generated
     
-    def _generate_class_method_files(self, class_methods_data: List[tuple]) -> int:
-        """Generate files for class methods."""
+    def _generate_class_method_files(self, class_methods_data: List[tuple]) -> Tuple[int, dict]:
+        """Generate files for class methods and return a function index."""
         if not class_methods_data:
             debug_print("No class methods found to generate files for.")
-            return 0
+            return 0, {}
 
         cpp_files_generated = 0
         used_filenames = set()
+        function_index: dict = {}
         
         debug_print(
             "Generating grouped C++ files for "
@@ -300,19 +341,25 @@ class CppGenerator:
                     f"for class '{class_name}' ({len(group)} methods) to {class_method_path}"
                 )
                 self._write_grouped_cpp_file(class_method_path, group)
+                self._index_group_functions(
+                    group,
+                    output_filename,
+                    function_index
+                )
                 cpp_files_generated += 1
 
         debug_print("Generated grouped C++ files for class methods.")
-        return cpp_files_generated
+        return cpp_files_generated, function_index
     
-    def _generate_standalone_function_files(self, standalone_functions_data: List[tuple]) -> int:
-        """Generate files for standalone functions."""
+    def _generate_standalone_function_files(self, standalone_functions_data: List[tuple]) -> Tuple[int, dict]:
+        """Generate files for standalone functions and return a function index."""
         if not standalone_functions_data:
             debug_print("No standalone functions found to generate files for.")
-            return 0
+            return 0, {}
         
         cpp_files_generated = 0
         used_filenames = set()
+        function_index: dict = {}
         
         debug_print(
             "Generating grouped C++ files for "
@@ -370,11 +417,66 @@ class CppGenerator:
                 f"({len(group)} functions) to {standalone_file_path}"
             )
             self._write_grouped_cpp_file(standalone_file_path, group)
+            self._index_group_functions(
+                group,
+                output_filename,
+                function_index
+            )
             cpp_files_generated += 1
 
         debug_print("Generated grouped C++ files for standalone functions.")
-        return cpp_files_generated
+        return cpp_files_generated, function_index
+
+    def _index_group_functions(self, grouped_functions: List[tuple],
+                               output_filename: str,
+                               function_index: dict) -> None:
+        """Add grouped functions to the function index mapping."""
+        for function_name, _, _, mangled_name, _ in grouped_functions:
+            if not function_name:
+                continue
+            if function_name in function_index:
+                # Prefer the first occurrence for deterministic output
+                if function_index[function_name]["file"] != output_filename:
+                    debug_print(
+                        f"WARNING - Duplicate function name '{function_name}' found in "
+                        f"{function_index[function_name]['file']} and {output_filename}. "
+                        "Keeping the first occurrence."
+                    )
+                continue
+            function_index[function_name] = {
+                "file": output_filename,
+                "library": self._detect_library_tag(function_name, mangled_name)
+            }
+
+    def _write_function_index(self, function_index: dict) -> None:
+        """Write function_index.json for fast function-to-file lookup."""
+        index_path = self.output_dir / "function_index.json"
+        try:
+            debug_print(f"Writing function index for {len(function_index)} functions to {index_path}")
+            with open(self._long_path(index_path), 'w', encoding='utf-8') as index_file:
+                json.dump(function_index, index_file, indent=4, ensure_ascii=False, sort_keys=True)
+        except Exception as e:
+            debug_print(f"ERROR - Failed to write function index: {e}")
     
+    @staticmethod
+    def _detect_library_tag(function_name: Optional[str],
+                            mangled_name: Optional[str] = None) -> Optional[str]:
+        """Return a short library tag if the function belongs to known boilerplate.
+
+        Checks the display name and mangled name against _LIBRARY_PATTERNS.
+        Returns the first matching tag (e.g. "WIL", "STL") or None.
+        """
+        names_to_check = []
+        if function_name:
+            names_to_check.append(function_name)
+        if mangled_name and mangled_name != function_name:
+            names_to_check.append(mangled_name)
+        for name in names_to_check:
+            for pattern, tag in CppGenerator._LIBRARY_PATTERNS:
+                if pattern in name:
+                    return tag
+        return None
+
     @staticmethod
     def _build_function_header_lines(signature: str, function_name: Optional[str] = None,
                                      mangled_name: Optional[str] = None,
@@ -382,11 +484,18 @@ class CppGenerator:
         header_lines = []
         if function_name:
             header_lines.append(f"// Function Name: {function_name}")
-        if mangled_name:
+        # Only show mangled name when it differs from the display name
+        if mangled_name and mangled_name != function_name:
             header_lines.append(f"// Mangled Name: {mangled_name}")
+        # Detect library/runtime origin and tag it
+        lib_tag = CppGenerator._detect_library_tag(function_name, mangled_name)
+        if lib_tag:
+            header_lines.append(f"// Library: {lib_tag}")
         if signature_extended and signature_extended != signature:
             header_lines.append(f"// Function Signature (Extended): {signature_extended}")
-        header_lines.append(f"// Function Signature: {signature}")
+        # Skip base signature when it's identical to function_name and extended is present
+        if signature and not (signature == function_name and signature_extended):
+            header_lines.append(f"// Function Signature: {signature}")
         return header_lines
 
     @staticmethod
@@ -453,8 +562,9 @@ class CppGenerator:
         trailing_blank_line = 1
         return len(header_lines) + len(code_lines) + trailing_blank_line
 
-    def _write_grouped_cpp_file(self, file_path: pathlib.Path, grouped_functions: List[tuple]) -> None:
-        """Write a grouped C++ source file for standalone functions."""
+    def _write_grouped_cpp_file(self, file_path: pathlib.Path,
+                               grouped_functions: List[tuple]) -> None:
+        """Write a grouped C++ source file."""
         safe_path = self._long_path(file_path)
         with open(safe_path, 'w', encoding='utf-8') as f:
             for index, (function_name, signature, signature_extended, mangled_name, cpp_code) in enumerate(grouped_functions):
