@@ -23,6 +23,8 @@ Detailed technical references for the extraction formats and database schemas ar
 
 - [**Data Format Reference**](docs/data_format_reference.md): Technical specification of the SQLite schema, data architecture, and analysis heuristics.
 - [**Analysis Metadata and Reports Reference**](docs/file_info_format_reference.md): Technical specification of the generated `file_info.md`, `file_info.json`, and C++ code output structure.
+- [**Function Index Format Reference**](docs/function_index_format_reference.md): Format and purpose of `function_index.json`, the lightweight function-to-file lookup index with library tagging.
+- [**Module Profile Format Reference**](docs/module_profile_format_reference.md): Format and computation of `module_profile.json`, the pre-computed module fingerprint covering identity, scale, library composition, API surface, complexity, and security posture.
 
 ## Use Cases
 
@@ -253,8 +255,12 @@ The script automatically downloads PDB debug symbols from Microsoft's public sym
 ├─ extracted_dbs/
 │  └─ <filename>_<hash>.db        # Individual analysis databases (one per file)
 ├─ extracted_code/
-│  └─ <filename>/                 # Generated C++ code (if enabled)
-│     └─ *.cpp
+│  └─ <module_name>/              # Per-module output directory
+│     ├─ *.cpp                    # Generated C++ code (if --generate-cpp)
+│     ├─ function_index.json      # Function-to-file lookup index
+│     ├─ module_profile.json      # Pre-computed module fingerprint
+│     ├─ file_info.json           # Structured analysis metadata
+│     └─ file_info.md             # Human-readable analysis report
 ├─ logs/
 │  ├─ <filename>_<timestamp>.log  # IDA analysis logs
 │  └─ symchk_<filename>_*.log    # Symbol download logs (if enabled)
@@ -364,10 +370,12 @@ The interactive mode provides a configuration interface for:
 
 ## Output Architecture
 
-The results are stored in a structured format designed for both human review and automated analysis. For a comprehensive technical reference of the data architecture, SQLite schemas, and analysis reports, see:
+The results are stored in a structured format designed for both human review and automated analysis. For comprehensive technical references, see:
 
 - [**Data Format Reference**](docs/data_format_reference.md) (Database & Heuristics)
 - [**Analysis Metadata and Reports Reference**](docs/file_info_format_reference.md) (Markdown & JSON Reports)
+- [**Function Index Format Reference**](docs/function_index_format_reference.md) (Function Lookup Index)
+- [**Module Profile Format Reference**](docs/module_profile_format_reference.md) (Module Fingerprint)
 
 The results are stored in two primary relational tables within the SQLite database.
 
@@ -395,12 +403,13 @@ The core table containing granular data for every function in the binary:
 
 ### Directory: `extracted_raw_code/` (Optional)
 
-If `--generate-cpp` is used, the tool creates a folder structure with generated C++ files and a **single Markdown file per module** (`file_info.md`) that serves as a high-level index and technical report for the binary.
+If `--generate-cpp` is used, the tool creates a folder structure with generated C++ files and per-module documentation:
 
 - **Class methods:** Grouped by class into combined files of about **250–300 lines** each. Files are named `{module}_{class}_group_1.cpp`, `{module}_{class}_group_2.cpp`, etc. Methods are packed in alphabetical order; each method is preceded by a comment block with its name and signature.
 - **Standalone functions:** Grouped into combined files of about **250–300 lines** each to reduce file count. Files are named `{module}_standalone_group_1.cpp`, `{module}_standalone_group_2.cpp`, etc. Functions are packed in alphabetical order; each function in a grouped file is preceded by a comment block with its name and signature.
-
-For more details on the report structure and C++ generation, see the [Analysis Metadata and Reports Reference](docs/file_info_format_reference.md).
+- **`function_index.json`:** A lightweight index mapping every function name to its `.cpp` file and library tag (WIL, STL, WRL, CRT, ETW/TraceLogging, or `null` for application code). See the [Function Index Format Reference](docs/function_index_format_reference.md).
+- **`module_profile.json`:** A pre-computed module fingerprint summarising identity, scale, library composition, API surface (COM, RPC, WinRT, Named Pipes), complexity metrics, and security posture. Unlike other outputs, this file is generated **unconditionally** after function extraction -- it does not require `--generate-cpp`. See the [Module Profile Format Reference](docs/module_profile_format_reference.md).
+- **`file_info.md` / `file_info.json`:** Human-readable and machine-readable analysis reports. See the [Analysis Metadata and Reports Reference](docs/file_info_format_reference.md).
 
 ## Technical Requirements
 
@@ -428,6 +437,7 @@ DeepExtract conforms to the IDA 9.x plugin architecture for compatibility and ma
 - `deep_extract/loop_analysis.py` - Control flow and loop detection (Tarjan's algorithm)
 - `deep_extract/pe_metadata.py` - PE header, Rich header, TLS callback extraction
 - `deep_extract/cpp_generator.py` - C++ code generation for AI consumption
+- `deep_extract/module_profile.py` - Module fingerprint generation (`module_profile.json`)
 - `deep_extract/schema.py` - SQLite schema management and migration
 - `deep_extract/config.py` - Configuration dataclass and validation
 

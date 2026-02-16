@@ -32,6 +32,7 @@ try:
     from . import cpp_generator
     from . import extractor_core
     from . import json_safety
+    from . import module_profile as _module_profile
     from . import schema
     from .config import AnalysisConfig
     from .logging_utils import debug_print, get_log_level
@@ -52,6 +53,7 @@ except ImportError:
     from extraction_tool import cpp_generator
     from extraction_tool import extractor_core
     from extraction_tool import json_safety
+    from extraction_tool import module_profile as _module_profile
     from extraction_tool import schema
     from extraction_tool.config import AnalysisConfig
     from extraction_tool.logging_utils import debug_print, get_log_level
@@ -1507,6 +1509,32 @@ def handle_database_updates(config: AnalysisConfig, pe_data: Dict[str, Any]) -> 
         extractor_core.debug_print(f"ERROR - Error in handle_database_updates: {str(e)}")
         return False
 
+def _resolve_module_name_and_profile_dir(config: AnalysisConfig) -> Tuple[str, pathlib.Path]:
+    """Compute the sanitised module name and output directory for the module profile.
+
+    When ``--generate-cpp`` is enabled the profile is co-located with the
+    generated C++ files.  Otherwise it is written next to the SQLite database.
+    """
+    name_without_ext = config.input_file_path.stem
+    extension = config.input_file_path.suffix.lstrip('.')
+
+    if extension:
+        module_name = cpp_generator.CppGenerator.sanitize_filename(f"{name_without_ext}_{extension}")
+    else:
+        module_name = cpp_generator.CppGenerator.sanitize_filename(name_without_ext)
+
+    if config.generate_cpp:
+        if config.cpp_output_dir:
+            base_dir = config.cpp_output_dir
+        else:
+            base_dir = config.sqlite_db_path.parent / "extracted_raw_code"
+        profile_dir = base_dir / module_name
+    else:
+        profile_dir = config.sqlite_db_path.parent
+
+    return module_name, profile_dir
+
+
 def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[int, int, int]:
     """Generates C++ files and documentation."""
     if not config.generate_cpp:
@@ -1539,19 +1567,34 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
-                SELECT function_name, function_signature, function_signature_extended,
-                       mangled_name, decompiled_code
+                SELECT function_id, function_name, function_signature,
+                       function_signature_extended, mangled_name, assembly_code,
+                       decompiled_code
                 FROM functions
                 WHERE decompiled_code IS NOT NULL 
                 AND decompiled_code != 'Decompiler not available'
                 AND decompiled_code NOT LIKE 'Decompilation failed:%'
             ''')
             functions_for_cpp = cursor.fetchall()
-            
-            if functions_for_cpp:
+
+            # Include failed decompilation entries in function_index.json with file=null.
+            cursor.execute('''
+                SELECT function_id, function_name, mangled_name, assembly_code
+                FROM functions
+                WHERE function_name IS NOT NULL
+                AND (
+                    decompiled_code IS NULL
+                    OR decompiled_code = 'Decompiler not available'
+                    OR decompiled_code LIKE 'Decompilation failed:%'
+                )
+            ''')
+            failed_functions_for_index = cursor.fetchall()
+
+            if functions_for_cpp or failed_functions_for_index:
                 return generator.generate_cpp_files_with_markdown(
                     functions_for_cpp,
-                    sqlite_db_path
+                    sqlite_db_path,
+                    failed_functions_for_index
                 )
             return (0, 0, 0)
     except Exception as e:
@@ -1721,6 +1764,19 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         if not functions_result:
             timer.print_summary(file_name)
             return 1
+        
+        # Module Profile Generation (always runs, independent of --generate-cpp)
+        timer.start_phase("module_profile")
+        try:
+            profile_module_name, profile_dir = _resolve_module_name_and_profile_dir(config)
+            _module_profile.generate_module_profile(
+                str(config.sqlite_db_path),
+                str(profile_dir),
+                profile_module_name
+            )
+        except Exception as e:
+            debug_print(f"WARNING - Module profile generation failed: {e}")
+        timer.end_phase("module_profile", "Module profile generation complete")
             
         # Output Generation
         if config.generate_cpp:

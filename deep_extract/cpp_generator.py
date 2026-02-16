@@ -132,7 +132,8 @@ class CppGenerator:
         truncated = base_filename[:limit - 11] + "_" + name_hash
         return truncated
     
-    def generate_cpp_files(self, processed_funcs: List[sqlite3.Row]) -> Tuple[int, int]:
+    def generate_cpp_files(self, processed_funcs: List[sqlite3.Row],
+                           failed_funcs_for_index: Optional[List[sqlite3.Row]] = None) -> Tuple[int, int]:
         """Generate C++ source files from extracted functions."""
         class_methods_data = []
         standalone_functions_data = []
@@ -149,6 +150,8 @@ class CppGenerator:
             signature_extended = (func_row['function_signature_extended']
                                  if 'function_signature_extended' in row_keys else None)
             mangled_name = func_row['mangled_name'] if 'mangled_name' in row_keys else None
+            function_id = func_row['function_id'] if 'function_id' in row_keys else None
+            has_assembly = bool(func_row['assembly_code']) if 'assembly_code' in row_keys else False
             decompiled_code = func_row['decompiled_code']  # This is our C++ source
             
             if not original_name or not decompiled_code:
@@ -180,12 +183,13 @@ class CppGenerator:
                 method_name = match.group(2)
                 class_methods_data.append(
                     (class_name, method_name, original_name, effective_signature,
-                     signature_extended, mangled_name, actual_cpp_code)
+                     signature_extended, mangled_name, actual_cpp_code,
+                     function_id, has_assembly)
                 )
             else:
                 standalone_functions_data.append(
                     (original_name, effective_signature, signature_extended,
-                     mangled_name, actual_cpp_code)
+                     mangled_name, actual_cpp_code, function_id, has_assembly)
                 )
         
         debug_print(f"Identified {len(class_methods_data)} class methods and "
@@ -207,21 +211,20 @@ class CppGenerator:
         cpp_files_generated += cpp_count
         for name, entry in standalone_index.items():
             if name in function_index:
-                debug_print(
-                    f"WARNING - Duplicate function name '{name}' found in "
-                    f"{function_index[name]['file']} and {entry['file']}. "
-                    "Keeping the first occurrence."
-                )
+                # Ignore duplicate function names
                 continue
             function_index[name] = entry
+
+        self._merge_failed_functions(function_index, failed_funcs_for_index)
 
         if function_index:
             self._write_function_index(function_index)
         
         return cpp_files_generated, md_files_generated
     
-    def generate_cpp_files_with_markdown(self, processed_funcs: List[sqlite3.Row], 
-                                        db_path: str) -> Tuple[int, int, int]:
+    def generate_cpp_files_with_markdown(self, processed_funcs: List[sqlite3.Row],
+                                         db_path: str,
+                                         failed_funcs_for_index: Optional[List[sqlite3.Row]] = None) -> Tuple[int, int, int]:
         """
         Generate C++ source files and markdown documentation.
         
@@ -235,7 +238,10 @@ class CppGenerator:
         debug_print("Starting C++ and markdown generation...")
         
         # Generate C++ files first
-        cpp_files_generated, md_files_generated = self.generate_cpp_files(processed_funcs)
+        cpp_files_generated, md_files_generated = self.generate_cpp_files(
+            processed_funcs,
+            failed_funcs_for_index=failed_funcs_for_index
+        )
         
         # Extract function names for markdown generation
         function_names = []
@@ -284,9 +290,11 @@ class CppGenerator:
         )
 
         methods_by_class = {}
-        for class_name, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str in class_methods_data:
+        for (class_name, method_name, original_name, signature, signature_extended,
+             mangled_name, cpp_code_str, function_id, has_assembly) in class_methods_data:
             methods_by_class.setdefault(class_name, []).append(
-                (class_name, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str)
+                (class_name, method_name, original_name, signature, signature_extended,
+                 mangled_name, cpp_code_str, function_id, has_assembly)
             )
 
         for class_name, class_methods in sorted(methods_by_class.items(), key=lambda item: item[0]):
@@ -297,7 +305,8 @@ class CppGenerator:
             current_group = []
             current_lines = 0
 
-            for _, method_name, original_name, signature, signature_extended, mangled_name, cpp_code_str in sorted_methods:
+            for (_, method_name, original_name, signature, signature_extended,
+                 mangled_name, cpp_code_str, function_id, has_assembly) in sorted_methods:
                 estimated_lines = self._estimate_function_lines(
                     signature,
                     cpp_code_str,
@@ -307,16 +316,25 @@ class CppGenerator:
                 )
 
                 if not current_group:
-                    current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                    current_group.append(
+                        (original_name, signature, signature_extended,
+                         mangled_name, cpp_code_str, function_id, has_assembly)
+                    )
                     current_lines = estimated_lines
                     continue
 
                 if current_lines + estimated_lines > self.CLASS_GROUP_TARGET_LINES:
                     grouped_methods.append(current_group)
-                    current_group = [(original_name, signature, signature_extended, mangled_name, cpp_code_str)]
+                    current_group = [(
+                        original_name, signature, signature_extended,
+                        mangled_name, cpp_code_str, function_id, has_assembly
+                    )]
                     current_lines = estimated_lines
                 else:
-                    current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                    current_group.append(
+                        (original_name, signature, signature_extended,
+                         mangled_name, cpp_code_str, function_id, has_assembly)
+                    )
                     current_lines += estimated_lines
 
             if current_group:
@@ -373,7 +391,8 @@ class CppGenerator:
         current_group = []
         current_lines = 0
 
-        for original_name, signature, signature_extended, mangled_name, cpp_code_str in sorted_standalone:
+        for (original_name, signature, signature_extended, mangled_name,
+             cpp_code_str, function_id, has_assembly) in sorted_standalone:
             estimated_lines = self._estimate_function_lines(
                 signature,
                 cpp_code_str,
@@ -383,16 +402,25 @@ class CppGenerator:
             )
 
             if not current_group:
-                current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                current_group.append(
+                    (original_name, signature, signature_extended,
+                     mangled_name, cpp_code_str, function_id, has_assembly)
+                )
                 current_lines = estimated_lines
                 continue
 
             if current_lines + estimated_lines > self.STANDALONE_GROUP_TARGET_LINES:
                 grouped_functions.append(current_group)
-                current_group = [(original_name, signature, signature_extended, mangled_name, cpp_code_str)]
+                current_group = [(
+                    original_name, signature, signature_extended,
+                    mangled_name, cpp_code_str, function_id, has_assembly
+                )]
                 current_lines = estimated_lines
             else:
-                current_group.append((original_name, signature, signature_extended, mangled_name, cpp_code_str))
+                current_group.append(
+                    (original_name, signature, signature_extended,
+                     mangled_name, cpp_code_str, function_id, has_assembly)
+                )
                 current_lines += estimated_lines
 
         if current_group:
@@ -431,7 +459,7 @@ class CppGenerator:
                                output_filename: str,
                                function_index: dict) -> None:
         """Add grouped functions to the function index mapping."""
-        for function_name, _, _, mangled_name, _ in grouped_functions:
+        for function_name, _, _, mangled_name, _, function_id, has_assembly in grouped_functions:
             if not function_name:
                 continue
             if function_name in function_index:
@@ -445,7 +473,37 @@ class CppGenerator:
                 continue
             function_index[function_name] = {
                 "file": output_filename,
-                "library": self._detect_library_tag(function_name, mangled_name)
+                "library": self._detect_library_tag(function_name, mangled_name),
+                "function_id": function_id,
+                "has_decompiled": True,
+                "has_assembly": has_assembly
+            }
+
+    def _merge_failed_functions(self,
+                                function_index: dict,
+                                failed_funcs_for_index: Optional[List[sqlite3.Row]]) -> None:
+        """Merge functions without decompiled output into function index."""
+        if not failed_funcs_for_index:
+            return
+
+        for func_row in failed_funcs_for_index:
+            row_keys = func_row.keys()
+            function_name = func_row['function_name'] if 'function_name' in row_keys else None
+            if not function_name:
+                continue
+            if function_name in function_index:
+                continue
+
+            mangled_name = func_row['mangled_name'] if 'mangled_name' in row_keys else None
+            function_id = func_row['function_id'] if 'function_id' in row_keys else None
+            has_assembly = bool(func_row['assembly_code']) if 'assembly_code' in row_keys else False
+
+            function_index[function_name] = {
+                "file": None,
+                "library": self._detect_library_tag(function_name, mangled_name),
+                "function_id": function_id,
+                "has_decompiled": False,
+                "has_assembly": has_assembly
             }
 
     def _write_function_index(self, function_index: dict) -> None:
@@ -567,7 +625,8 @@ class CppGenerator:
         """Write a grouped C++ source file."""
         safe_path = self._long_path(file_path)
         with open(safe_path, 'w', encoding='utf-8') as f:
-            for index, (function_name, signature, signature_extended, mangled_name, cpp_code) in enumerate(grouped_functions):
+            for index, (function_name, signature, signature_extended,
+                        mangled_name, cpp_code, _, _) in enumerate(grouped_functions):
                 header_lines = self._build_function_header_lines(
                     signature,
                     function_name=function_name,

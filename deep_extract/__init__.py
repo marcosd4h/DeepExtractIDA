@@ -138,6 +138,11 @@ from .cpp_generator import (
     generate_extraction_documentation,
 )
 
+# Module profile generation
+from .module_profile import (
+    generate_module_profile,
+)
+
 # Schema management
 from .schema import (
     CURRENT_SCHEMA_VERSION,
@@ -254,6 +259,9 @@ __all__ = [
     'CppGenerator',
     'generate_standalone_markdown_documentation',
     'generate_extraction_documentation',
+    
+    # Module profile generation
+    'generate_module_profile',
     
     # Schema management
     'CURRENT_SCHEMA_VERSION',
