@@ -35,8 +35,8 @@ class CppGenerator:
     WINDOWS_MAX_PATH = 259
     
     # Target line range for grouped standalone function files
-    STANDALONE_GROUP_TARGET_LINES = 300
-    STANDALONE_GROUP_MIN_LINES = 250
+    STANDALONE_GROUP_TARGET_LINES = 500
+    STANDALONE_GROUP_MIN_LINES = 450
     # Target line range for grouped class method files
     CLASS_GROUP_TARGET_LINES = STANDALONE_GROUP_TARGET_LINES
     CLASS_GROUP_MIN_LINES = STANDALONE_GROUP_MIN_LINES
