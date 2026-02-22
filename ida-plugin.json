@@ -3,11 +3,12 @@
   "plugin": {
     "name": "DeepExtract",
     "entryPoint": "main.py",
-    "version": "0.0.9",
+    "version": "0.9.8",
     "idaVersions": [
       "9.0",
       "9.1",
-      "9.2"
+      "9.2",
+      "9.3"
     ],
     "platforms": [
       "windows-x86_64"
