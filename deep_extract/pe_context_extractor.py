@@ -1,6 +1,5 @@
 # Standard library imports
 import argparse
-import ctypes
 import json
 import os
 import pathlib
@@ -982,45 +981,37 @@ def _profile_track_slowest(profile: Optional[Dict[str, Any]], duration: float, e
 
 
 def _decompile_with_timeout(func, timeout_seconds: float):
-    """Run ida_hexrays.decompile() with a per-function timeout.
+    """Run ida_hexrays.decompile() in a daemon thread with a hard timeout.
 
-    A watchdog thread raises TimeoutError in the calling thread if the
-    decompile call does not finish within *timeout_seconds*.  Because
-    ``ida_hexrays.decompile`` is a C-level call, the async exception is
-    delivered at the next Python bytecode boundary; if the C code never
-    yields, the external batch-level process timeout remains as a backstop.
+    The decompile call executes in a background thread while the main thread
+    waits via ``join(timeout)``.  If the worker does not finish in time it is
+    abandoned (left as a leaked daemon thread) and ``TimeoutError`` is raised
+    so the caller can skip the function and continue.  The abandoned thread
+    will be cleaned up when the IDA process exits.
+
+    This avoids the previous ``PyThreadState_SetAsyncExc`` approach which
+    cannot interrupt a C-level call that never returns to Python bytecode.
     """
-    caller_tid = threading.current_thread().ident
-    finished = threading.Event()
     result_holder: List = []
     error_holder: List = []
 
-    def _watchdog():
-        if not finished.wait(timeout_seconds):
-            ctypes.pythonapi.PyThreadState_SetAsyncExc(
-                ctypes.c_ulong(caller_tid),
-                ctypes.py_object(TimeoutError),
-            )
+    def _worker():
+        try:
+            cfunc = ida_hexrays.decompile(func)
+            result_holder.append(cfunc)
+        except Exception as exc:
+            error_holder.append(exc)
 
-    watchdog = threading.Thread(target=_watchdog, daemon=True)
-    watchdog.start()
-    try:
-        cfunc = ida_hexrays.decompile(func)
-        result_holder.append(cfunc)
-    except TimeoutError:
-        error_holder.append(TimeoutError)
-    except Exception as exc:
-        error_holder.append(exc)
-    finally:
-        finished.set()
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
 
+    if worker.is_alive():
+        raise TimeoutError(
+            f"Decompilation timed out after {timeout_seconds:.0f}s"
+        )
     if error_holder:
-        exc = error_holder[0]
-        if exc is TimeoutError:
-            raise TimeoutError(
-                f"Decompilation timed out after {timeout_seconds:.0f}s"
-            )
-        raise exc
+        raise error_holder[0]
     return result_holder[0] if result_holder else None
 
 
