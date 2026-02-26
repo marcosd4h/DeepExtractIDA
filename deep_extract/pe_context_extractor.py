@@ -1,5 +1,6 @@
 # Standard library imports
 import argparse
+import ctypes
 import json
 import os
 import pathlib
@@ -980,6 +981,49 @@ def _profile_track_slowest(profile: Optional[Dict[str, Any]], duration: float, e
         entries[min_idx] = item
 
 
+def _decompile_with_timeout(func, timeout_seconds: float):
+    """Run ida_hexrays.decompile() with a per-function timeout.
+
+    A watchdog thread raises TimeoutError in the calling thread if the
+    decompile call does not finish within *timeout_seconds*.  Because
+    ``ida_hexrays.decompile`` is a C-level call, the async exception is
+    delivered at the next Python bytecode boundary; if the C code never
+    yields, the external batch-level process timeout remains as a backstop.
+    """
+    caller_tid = threading.current_thread().ident
+    finished = threading.Event()
+    result_holder: List = []
+    error_holder: List = []
+
+    def _watchdog():
+        if not finished.wait(timeout_seconds):
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_ulong(caller_tid),
+                ctypes.py_object(TimeoutError),
+            )
+
+    watchdog = threading.Thread(target=_watchdog, daemon=True)
+    watchdog.start()
+    try:
+        cfunc = ida_hexrays.decompile(func)
+        result_holder.append(cfunc)
+    except TimeoutError:
+        error_holder.append(TimeoutError)
+    except Exception as exc:
+        error_holder.append(exc)
+    finally:
+        finished.set()
+
+    if error_holder:
+        exc = error_holder[0]
+        if exc is TimeoutError:
+            raise TimeoutError(
+                f"Decompilation timed out after {timeout_seconds:.0f}s"
+            )
+        raise exc
+    return result_holder[0] if result_holder else None
+
+
 def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int], profile: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Extracts data for a single function.
@@ -1033,14 +1077,27 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
                 func_size = func.end_ea - func.start_ea
                 if func_size > constants.DECOMPILATION_SIZE_WARNING:
                     extractor_core.debug_print(f"WARNING - Large function at 0x{ea:X} ({func_size} bytes).")
-                
-                decompiler = ida_hexrays.decompile(func)
+
+                decompiler = _decompile_with_timeout(func, constants.DECOMPILATION_TIMEOUT)
                 if decompiler:
                     decompiled_code = str(decompiler)
                     if not decompiled_code or len(decompiled_code.strip()) < constants.DECOMPILATION_MIN_OUTPUT_LENGTH:
                         decompiled_code = "Decompilation produced empty output"
                 else:
                     decompiled_code = "Decompiler returned None"
+            except TimeoutError as te:
+                decompiled_code = f"Decompilation failed: {str(te)}"
+                extractor_core.debug_print(
+                    f"WARNING - Decompilation timed out for {demangled_name} at 0x{ea:X} "
+                    f"after {constants.DECOMPILATION_TIMEOUT}s — skipping decompilation for this function"
+                )
+                analysis_errors.append({
+                    "stage": "decompile",
+                    "severity": "warning",
+                    "error": str(te),
+                    "reason": "timeout",
+                    "timeout_seconds": constants.DECOMPILATION_TIMEOUT,
+                })
             except Exception as e:
                 decompiled_code = f"Decompilation failed: {str(e)}"
                 analysis_errors.append({"stage": "decompile", "error": str(e)})

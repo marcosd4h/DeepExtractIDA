@@ -53,6 +53,7 @@ LARGE_BINARY_THRESHOLD = 5000    # Function count threshold for large binaries
 # Decompilation Configuration
 DECOMPILATION_SIZE_WARNING = 1000000  # Function size in bytes to trigger warning (1MB)
 DECOMPILATION_TIMEOUT_WARNING = 30.0  # Seconds after which decompilation is considered slow
+DECOMPILATION_TIMEOUT = 600           # Hard timeout (seconds) per function, decompilation is skipped if exceeded
 DECOMPILATION_MIN_OUTPUT_LENGTH = 10  # Minimum length for valid decompiled output
 
 # Database Performance Configuration
