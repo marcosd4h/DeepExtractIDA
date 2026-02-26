@@ -87,6 +87,16 @@ def get_expected_schema() -> Dict[str, List[str]]:
             'loop_analysis TEXT',
             'analysis_errors TEXT',
             'created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP'
+        ],
+        'function_xrefs': [
+            'id INTEGER PRIMARY KEY AUTOINCREMENT',
+            'source_id INTEGER',
+            'target_id INTEGER',
+            'target_name TEXT NOT NULL',
+            'target_module TEXT',
+            'function_type INTEGER DEFAULT 0',
+            'xref_type TEXT',
+            'direction TEXT NOT NULL',
         ]
     }
 
@@ -288,7 +298,14 @@ def migrate_schema(conn: sqlite3.Connection, from_version: int, to_version: int)
         return False
 
 
-def check_and_validate_schema(db_path: str, force_reanalyze: bool = False) -> Tuple[bool, str]:
+def _apply_essential_pragmas(conn: sqlite3.Connection) -> None:
+    """Apply the essential PRAGMAs that affect correctness during concurrent access."""
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 20000")
+
+
+def check_and_validate_schema(db_path: str, force_reanalyze: bool = False,
+                              pragmas: Optional[dict] = None) -> Tuple[bool, str]:
     """
     Full schema validation entry point.
     
@@ -297,12 +314,25 @@ def check_and_validate_schema(db_path: str, force_reanalyze: bool = False) -> Tu
     Args:
         db_path: Path to the database
         force_reanalyze: If True, allows re-initialization of schema
+        pragmas: Optional dictionary of PRAGMA settings for consistency
+            with the rest of the codebase. Falls back to essential PRAGMAs
+            (WAL + busy_timeout) when not provided.
         
     Returns:
         Tuple of (is_valid, error_message)
     """
+    conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=20)
+        # Apply user-supplied PRAGMAs when available, otherwise essential defaults
+        if pragmas and isinstance(pragmas, dict):
+            for key, value in pragmas.items():
+                if key == "busy_timeout_ms":
+                    conn.execute(f"PRAGMA busy_timeout = {value}")
+                else:
+                    conn.execute(f"PRAGMA {key} = {value}")
+        else:
+            _apply_essential_pragmas(conn)
         
         # Check if this is a new database
         cursor = conn.cursor()
@@ -316,7 +346,6 @@ def check_and_validate_schema(db_path: str, force_reanalyze: bool = False) -> Tu
             debug_print("New database detected - initializing schema...")
             if not initialize_schema_version(conn, CURRENT_SCHEMA_VERSION, SCHEMA_VERSION_DESCRIPTION):
                 return False, "Failed to initialize schema version"
-            conn.close()
             return True, "New database initialized with current schema"
         
         # Existing database - validate version
@@ -328,10 +357,8 @@ def check_and_validate_schema(db_path: str, force_reanalyze: bool = False) -> Tu
                 debug_print("No schema version found - initializing (force_reanalyze=True)...")
                 if not initialize_schema_version(conn, CURRENT_SCHEMA_VERSION, SCHEMA_VERSION_DESCRIPTION):
                     return False, "Failed to initialize schema version"
-                conn.close()
                 return True, "Schema version initialized on existing database"
             else:
-                conn.close()
                 return False, (f"Schema version missing. Database may be from an old tool version.\n"
                               f"Expected version: v{CURRENT_SCHEMA_VERSION}\n"
                               f"Action: Use --force-reanalyze to reinitialize, or migrate manually.")
@@ -344,24 +371,20 @@ def check_and_validate_schema(db_path: str, force_reanalyze: bool = False) -> Tu
                 if migrate_schema(conn, current_version, CURRENT_SCHEMA_VERSION):
                     current_version = CURRENT_SCHEMA_VERSION
                 else:
-                    conn.close()
                     return False, (f"{message}\n"
                                   f"Action: Migration failed. Use --force-reanalyze to recreate.")
             else:
-                conn.close()
                 return False, (f"{message}\n"
                               f"Action: Update extraction_tool to the latest version.")
         
         # Validate structure
         structure_valid, structure_errors = validate_schema_structure(conn)
         if not structure_valid:
-            conn.close()
             error_details = "\n  - ".join(structure_errors)
             return False, (f"Schema structure validation failed:\n  - {error_details}\n"
                           f"Action: Database schema is corrupted or incomplete. "
                           f"Use --force-reanalyze to recreate.")
         
-        conn.close()
         return True, f"Schema validation passed: v{current_version}"
         
     except Exception as e:
@@ -369,6 +392,12 @@ def check_and_validate_schema(db_path: str, force_reanalyze: bool = False) -> Tu
         debug_print(f"ERROR - Schema validation exception: {str(e)}")
         debug_print(traceback.format_exc())
         return False, f"Schema validation exception: {str(e)}"
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 # Example migration function template (for future use)

@@ -3,9 +3,9 @@ String analysis utilities for PE binary analysis.
 """
 
 import hashlib
+import json
 import os
 import time
-import pickle
 import tempfile
 from typing import Dict, Set, List, Optional
 
@@ -16,6 +16,19 @@ import ida_nalt
 import ida_loader
 
 from .logging_utils import debug_print, safe_decode
+
+
+def _serialize_string_map(string_map: Dict[int, Set[str]]) -> str:
+    """Serialize string map to JSON (int keys -> str keys, sets -> sorted lists)."""
+    serializable = {str(k): sorted(v) for k, v in string_map.items()}
+    return json.dumps(serializable, ensure_ascii=False)
+
+
+def _deserialize_string_map(data: str) -> Dict[int, Set[str]]:
+    """Deserialize string map from JSON back to Dict[int, Set[str]]."""
+    raw = json.loads(data)
+    return {int(k): set(v) for k, v in raw.items()}
+
 
 def build_string_map(cache_file: Optional[str] = None, use_cache: bool = True) -> Dict[int, Set[str]]:
     """
@@ -34,12 +47,10 @@ def build_string_map(cache_file: Optional[str] = None, use_cache: bool = True) -
     if use_cache:
         try:
             if cache_file is None:
-                # Generate cache filename based on input file hash
                 input_file = ida_nalt.get_input_file_path()
                 file_hash = hashlib.md5(input_file.encode()).hexdigest()[:16]
-                cache_file = os.path.join(tempfile.gettempdir(), f"ida_string_map_{file_hash}.cache")
+                cache_file = os.path.join(tempfile.gettempdir(), f"ida_string_map_{file_hash}.json")
             
-            # Check if cache exists and is recent (modified after IDB)
             if os.path.exists(cache_file):
                 idb_path = ida_loader.get_path(ida_loader.PATH_TYPE_IDB)
                 idb_mtime = os.path.getmtime(idb_path) if idb_path and os.path.exists(idb_path) else 0
@@ -47,8 +58,8 @@ def build_string_map(cache_file: Optional[str] = None, use_cache: bool = True) -
                 
                 if cache_mtime > idb_mtime:
                     debug_print(f"Loading string map from cache: {cache_file}")
-                    with open(cache_file, 'rb') as f:
-                        cached_data = pickle.load(f)
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        cached_data = _deserialize_string_map(f.read())
                         duration = time.time() - start_time
                         debug_print(f"TRACE - Loaded cached string map in {duration:.4f}s")
                         return cached_data
@@ -80,7 +91,6 @@ def build_string_map(cache_file: Optional[str] = None, use_cache: bool = True) -
                 
                 string_count += 1
                 
-                # Process xrefs for this string
                 for xref in idautils.XrefsTo(s_info.ea):
                     func = ida_funcs.get_func(xref.frm)
                     if func:
@@ -90,7 +100,6 @@ def build_string_map(cache_file: Optional[str] = None, use_cache: bool = True) -
                         string_map[func_ea].add(s)
                         xref_count += 1
                 
-                # Progress reporting for large binaries
                 if total_strings > 10000 and idx > 0 and idx % (total_strings // 10) == 0:
                     progress = (idx * 100) // total_strings
                     debug_print(f"String map progress: {progress}% ({idx}/{total_strings})")
@@ -102,11 +111,10 @@ def build_string_map(cache_file: Optional[str] = None, use_cache: bool = True) -
         
         debug_print(f"Processed {string_count} strings with {xref_count} cross-references")
         
-        # Save to cache if enabled
         if use_cache and cache_file:
             try:
-                with open(cache_file, 'wb') as f:
-                    pickle.dump(string_map, f, protocol=pickle.HIGHEST_PROTOCOL)
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    f.write(_serialize_string_map(string_map))
                 debug_print(f"Saved string map cache to: {cache_file}")
             except Exception as e:
                 debug_print(f"WARNING - Could not save string map cache to '{cache_file}': {e}")

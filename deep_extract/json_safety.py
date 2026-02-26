@@ -391,7 +391,7 @@ def _truncate_large_dict_fields(obj: dict, target_bytes: int) -> dict:
             field_json = json.dumps({key: value})
             field_size = len(field_json.encode('utf-8'))
             field_sizes.append((key, field_size, value))
-        except:
+        except Exception:
             # If we can't serialize this field, it's a good candidate for removal
             field_sizes.append((key, sys.maxsize, value))
     
@@ -416,7 +416,7 @@ def _truncate_large_dict_fields(obj: dict, target_bytes: int) -> dict:
                 current_size = test_size
             else:
                 removed_fields.append(key)
-        except:
+        except Exception:
             removed_fields.append(key)
     
     # Add metadata about removed fields

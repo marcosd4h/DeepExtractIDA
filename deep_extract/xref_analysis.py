@@ -66,6 +66,22 @@ except ImportError:
 # Import directly from constants module
 from .constants import _strip_import_prefix
 
+_XREF_TYPE_MAP = {
+    ida_xref.fl_CF: "Call Far",
+    ida_xref.fl_CN: "Call Near",
+    ida_xref.fl_JF: "Jump Far",
+    ida_xref.fl_JN: "Jump Near",
+    ida_xref.fl_F: "Ordinary Flow",
+    ida_xref.dr_O: "Offset",
+    ida_xref.dr_W: "Write",
+    ida_xref.dr_R: "Read",
+    ida_xref.dr_T: "Text (user specified)",
+    ida_xref.dr_I: "Informational",
+    ida_xref.XREF_USER: "User Defined",
+    ida_xref.XREF_TAIL: "Tail",
+    ida_xref.XREF_BASE: "Base Offset",
+}
+
 
 def map_xref_type_to_string(xref_type: int) -> str:
     """
@@ -74,23 +90,8 @@ def map_xref_type_to_string(xref_type: int) -> str:
     :param xref_type: The numeric xref type constant from IDA APIs.
     :return: A string describing the cross-reference type.
     """
-    type_map = {
-        ida_xref.fl_CF: "Call Far",
-        ida_xref.fl_CN: "Call Near",
-        ida_xref.fl_JF: "Jump Far",
-        ida_xref.fl_JN: "Jump Near",
-        ida_xref.fl_F: "Ordinary Flow",
-        ida_xref.dr_O: "Offset",
-        ida_xref.dr_W: "Write",
-        ida_xref.dr_R: "Read",
-        ida_xref.dr_T: "Text (user specified)",
-        ida_xref.dr_I: "Informational",
-        ida_xref.XREF_USER: "User Defined",
-        ida_xref.XREF_TAIL: "Tail",
-        ida_xref.XREF_BASE: "Base Offset",
-    }
     base_type = xref_type & 0x1F
-    type_str = type_map.get(base_type, f"Unknown Type ({base_type})")
+    type_str = _XREF_TYPE_MAP.get(base_type, f"Unknown Type ({base_type})")
 
     flags = []
     if xref_type & ida_xref.XREF_USER: flags.append("User")
@@ -103,10 +104,12 @@ def map_xref_type_to_string(xref_type: int) -> str:
     return type_str
 
 
-def build_import_address_set() -> Set[int]:
+def build_import_address_set(delay_import_addresses: Optional[Set[int]] = None) -> Set[int]:
     """
     Builds a set of all import addresses for quick lookup during classification.
     Augmented to include delay-load imports and '__imp_load_' thunks.
+    :param delay_import_addresses: Pre-computed delay-load import addresses to avoid
+        redundant PE parsing. If None, delay imports are enumerated via pefile.
     :return: Set of import addresses
     """
     import_addresses = set()
@@ -125,23 +128,26 @@ def build_import_address_set() -> Set[int]:
             if name.startswith("__imp_load_") or name.startswith("_imp_load_"):
                 import_addresses.add(ea)
 
-        # Parse delay import directory with pefile
-        try:
-            if pefile is not None:
-                pe_path = ida_nalt.get_input_file_path()
-                pe = pefile.PE(pe_path, fast_load=True)
-                if hasattr(pe, 'DIRECTORY_ENTRY_DELAY_IMPORT'):
-                    ida_base = ida_nalt.get_imagebase()
-                    pe_base = pe.OPTIONAL_HEADER.ImageBase
-                    for dll in pe.DIRECTORY_ENTRY_DELAY_IMPORT:
-                        for imp in dll.imports:
-                            if imp.address:
-                                ea = (imp.address - pe_base) + ida_base
-                                if _cached_is_loaded(ea):
-                                    import_addresses.add(ea)
-                del pe
-        except Exception as e:
-            debug_print(f"WARNING - Failed delay-import enumeration via pefile: {e}")
+        if delay_import_addresses is not None:
+            import_addresses.update(delay_import_addresses)
+        else:
+            # Parse delay import directory with pefile (fallback when not pre-computed)
+            try:
+                if pefile is not None:
+                    pe_path = ida_nalt.get_input_file_path()
+                    pe = pefile.PE(pe_path, fast_load=True)
+                    if hasattr(pe, 'DIRECTORY_ENTRY_DELAY_IMPORT'):
+                        ida_base = ida_nalt.get_imagebase()
+                        pe_base = pe.OPTIONAL_HEADER.ImageBase
+                        for dll in pe.DIRECTORY_ENTRY_DELAY_IMPORT:
+                            for imp in dll.imports:
+                                if imp.address:
+                                    ea = (imp.address - pe_base) + ida_base
+                                    if _cached_is_loaded(ea):
+                                        import_addresses.add(ea)
+                    del pe
+            except Exception as e:
+                debug_print(f"WARNING - Failed delay-import enumeration via pefile: {e}")
 
     except Exception as e:
         import traceback
@@ -308,8 +314,6 @@ def check_for_dangerous_calls(outbound_xrefs: List[Dict[str, Any]], dangerous_ap
     :param dangerous_api_set: Legacy parameter (ignored - uses constants module).
     :return: A JSON string containing a list of unique dangerous calls found.
     """
-    debug_print("TRACE - Starting: check_for_dangerous_calls")
-    start_time = time.time()
     found_dangerous_calls = []
     try:
         for xref in outbound_xrefs:
@@ -320,8 +324,6 @@ def check_for_dangerous_calls(outbound_xrefs: List[Dict[str, Any]], dangerous_ap
     except TypeError as e:
         debug_print(f"ERROR - Error processing outbound xrefs for dangerous calls: {e}")
     
-    duration = time.time() - start_time
-    debug_print(f"TRACE - Finished: check_for_dangerous_calls. Duration: {duration:.4f}s")
     return json.dumps(list(set(found_dangerous_calls)))
 
 
@@ -342,17 +344,20 @@ def _initialize_xref_data():
     }
 
 
+_EXCLUDED_TARGETS = frozenset({
+    "_guard_dispatch_icall_nop",
+    "__guard_dispatch_icall_fptr",
+    "__security_check_cookie",
+    "WPP_GLOBAL_Control"
+})
+
+
 def _get_excluded_targets():
     """
     Returns set of function names that should be excluded from xref analysis.
     :return: Set of excluded function names
     """
-    return {
-        "_guard_dispatch_icall_nop",
-        "__guard_dispatch_icall_fptr",
-        "__security_check_cookie",
-        "WPP_GLOBAL_Control"
-    }
+    return _EXCLUDED_TARGETS
 
 
 def _process_inbound_xref(xref, target_ea, import_addresses):
@@ -1109,7 +1114,7 @@ def _extract_outbound_xrefs(target_ea: int, import_addresses: Set[int],
         _process_jump_table_targets(item_ea, import_addresses, excluded_targets, function_being_analyzed, processed_calls, xref_data)
 
 
-def extract_function_xrefs(function_ea):
+def extract_function_xrefs(function_ea, import_addresses=None):
     """
     Extracts full cross-reference data for a single function.
     
@@ -1117,14 +1122,15 @@ def extract_function_xrefs(function_ea):
     Refactored to use helper functions for better maintainability.
 
     :param function_ea: The starting effective address of the function.
+    :param import_addresses: Pre-computed set of import addresses. If None, built on demand.
     :return: Dictionary containing xref data.
     """
     debug_print(f"TRACE - Starting: extract_function_xrefs for 0x{function_ea:X}")
     start_time = time.time()
     
     try:
-        # Build import address set for fast classification
-        import_addresses = build_import_address_set()
+        if import_addresses is None:
+            import_addresses = build_import_address_set()
         
         # Initialize result structure
         xref_data = _initialize_xref_data()

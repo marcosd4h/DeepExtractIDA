@@ -265,7 +265,7 @@ def is_indirect_jump_instruction(ea: int) -> bool:
         insn = ida_ua.insn_t()
         if ida_ua.decode_insn(insn, ea):
             return ida_idp.is_indirect_jump_insn(insn)
-    except:
+    except Exception:
         pass
     return False
 
@@ -817,7 +817,7 @@ def track_displacement_loads(ea: int, base_reg: int, displacement: int) -> Dict[
                         tracking_info['confidence'] = 'medium'
                         tracking_info['object_type'] = 'structure_with_function_pointers'
                         
-                except:
+                except Exception:
                     # Memory read failed, might not be a valid structure
                     pass
                     

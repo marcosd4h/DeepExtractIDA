@@ -342,7 +342,7 @@ def init_sqlite_db(db_path: str, force_reanalyze: bool = False, pragmas: Optiona
         
         if not is_new_database and not force_reanalyze:
             # Validate existing schema before proceeding
-            schema_valid, schema_message = schema.check_and_validate_schema(db_path, force_reanalyze)
+            schema_valid, schema_message = schema.check_and_validate_schema(db_path, force_reanalyze, pragmas=pragmas)
             if not schema_valid:
                 debug_print(f"ERROR - Schema validation failed: {schema_message}")
                 conn.close()
@@ -355,6 +355,7 @@ def init_sqlite_db(db_path: str, force_reanalyze: bool = False, pragmas: Optiona
                 conn.execute('DROP TABLE IF EXISTS functions')
                 conn.execute('DROP TABLE IF EXISTS file_info')
                 conn.execute('DROP TABLE IF EXISTS schema_version')
+                conn.execute('DROP TABLE IF EXISTS function_xrefs')
 
             # Create schema_version table first
             conn.execute('''
@@ -448,6 +449,24 @@ def init_sqlite_db(db_path: str, force_reanalyze: bool = False, pragmas: Optiona
             # Case-insensitive lookups on file_info
             conn.execute('CREATE INDEX IF NOT EXISTS idx_file_info_lower_name ON file_info(LOWER(file_name))')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_file_info_lower_ext ON file_info(LOWER(file_extension))')
+
+            # Normalized cross-reference table for efficient graph queries
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS function_xrefs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_id INTEGER,
+                    target_id INTEGER,
+                    target_name TEXT NOT NULL,
+                    target_module TEXT,
+                    function_type INTEGER DEFAULT 0,
+                    xref_type TEXT,
+                    direction TEXT NOT NULL
+                )
+            ''')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_fxrefs_source ON function_xrefs(source_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_fxrefs_target ON function_xrefs(target_id)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_fxrefs_target_name ON function_xrefs(target_name COLLATE NOCASE)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_fxrefs_direction ON function_xrefs(direction)')
         
         duration = time.time() - start_time
         debug_print(f"TRACE - Finished: init_sqlite_db. Duration: {duration:.4f}s")
@@ -1015,7 +1034,7 @@ def _decompile_with_timeout(func, timeout_seconds: float):
     return result_holder[0] if result_holder else None
 
 
-def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int], profile: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int], import_addresses: Optional[set] = None, profile: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Extracts data for a single function.
     
@@ -1024,6 +1043,7 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
     :param has_decompiler: Whether decompiler is available.
     :param options: Extraction options (flags).
     :param addr_to_id: Map of function addresses to their sequential IDs.
+    :param import_addresses: Pre-computed set of import addresses for xref classification.
     :return: Dictionary of extracted data or None on failure.
     """
     try:
@@ -1104,7 +1124,7 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
         # Cross-references
         xref_start = time.perf_counter()
         try:
-            xref_data = extractor_core.extract_function_xrefs(ea)
+            xref_data = extractor_core.extract_function_xrefs(ea, import_addresses=import_addresses)
         except Exception as e:
             analysis_errors.append({"stage": "xrefs", "error": str(e)})
             xref_data = {
@@ -1257,7 +1277,9 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             'stack_frame': json_safety.to_json_safe(stack_frame, field_name="stack_frame"),
             'string_literals': json_safety.safe_serialize_strings(string_literals, "string_literals"),
             'dangerous_api_calls': dangerous_calls,
-            'analysis_errors': json_safety.to_json_safe(analysis_errors, max_list_items=100, field_name="analysis_errors")
+            'analysis_errors': json_safety.to_json_safe(analysis_errors, max_list_items=100, field_name="analysis_errors"),
+            '_raw_simple_inbound': simple_inbound,
+            '_raw_simple_outbound': simple_outbound,
         }
 
     except Exception as e:
@@ -1307,6 +1329,12 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         addr_to_id = {ea: i + 1 for i, ea in enumerate(function_addresses)}
         _profile_add_stage(profile, "build_addr_map", time.perf_counter() - addr_map_start)
         
+        # Pre-build import address set once (avoids rebuilding per-function in xref analysis)
+        import_set_start = time.perf_counter()
+        pre_delay_addrs = kwargs.get('delay_import_addresses') or None
+        import_addresses = extractor_core.build_import_address_set(pre_delay_addrs)
+        _profile_add_stage(profile, "build_import_address_set", time.perf_counter() - import_set_start)
+        
         # Adaptive batch sizing
         if num_functions < constants.SMALL_BINARY_THRESHOLD:
             BATCH_SIZE = constants.BATCH_SIZE_SMALL_BINARY
@@ -1324,15 +1352,6 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         with get_db_connection(sqlite_db_path, pragmas=db_pragmas) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
-            # Clear old data
-            try:
-                cursor.execute('BEGIN IMMEDIATE')
-                cursor.execute('DELETE FROM functions')
-                cursor.execute('COMMIT')
-            except Exception as e:
-                cursor.execute('ROLLBACK')
-                raise e
 
             # Insert file info
             cursor.execute('''
@@ -1388,13 +1407,16 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                 if f: ida_funcs.reanalyze_function(f)
             _profile_add_stage(profile, "reanalyze_functions", time.perf_counter() - reanalyze_start)
             
-            # Process functions
+            # Process functions -- clear old data in the same transaction as
+            # the first batch insert so partial failure leaves old data intact.
             cursor.execute('BEGIN IMMEDIATE')
+            cursor.execute('DELETE FROM functions')
+            cursor.execute('DELETE FROM function_xrefs')
             batch_count = 0
             
             for idx, ea in enumerate(function_addresses):
                 func_total_start = time.perf_counter()
-                func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id, profile=profile)
+                func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id, import_addresses=import_addresses, profile=profile)
                 func_total_duration = time.perf_counter() - func_total_start
                 if profile_enabled:
                     func_name = extractor_core.get_raw_function_name(ea)
@@ -1402,6 +1424,11 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                     _profile_track_slowest(profile, func_total_duration, ea, func_name)
                 
                 if func_data:
+                    # Extract raw xref lists before DB insert (not in functions table schema)
+                    raw_inbound = func_data.pop('_raw_simple_inbound', [])
+                    raw_outbound = func_data.pop('_raw_simple_outbound', [])
+                    func_id = func_data['function_id']
+
                     insert_start = time.perf_counter()
                     cursor.execute('''
                         INSERT INTO functions (
@@ -1418,6 +1445,33 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                             :string_literals, :dangerous_api_calls, :analysis_errors
                         )
                     ''', func_data)
+
+                    # Populate normalized function_xrefs table
+                    for xref in raw_outbound:
+                        cursor.execute('''
+                            INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
+                            VALUES (?, ?, ?, ?, ?, ?, 'outbound')
+                        ''', (
+                            func_id,
+                            xref.get('function_id'),
+                            xref.get('function_name', ''),
+                            xref.get('module_name'),
+                            xref.get('function_type', 0),
+                            xref.get('xref_type'),
+                        ))
+                    for xref in raw_inbound:
+                        cursor.execute('''
+                            INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
+                            VALUES (?, ?, ?, ?, ?, ?, 'inbound')
+                        ''', (
+                            xref.get('function_id'),
+                            func_id,
+                            xref.get('function_name', ''),
+                            xref.get('module_name'),
+                            xref.get('function_type', 0),
+                            xref.get('xref_type'),
+                        ))
+
                     _profile_add_stage(profile, "db_insert", time.perf_counter() - insert_start)
                     functions_processed_count += 1
                     batch_count += 1
@@ -1458,7 +1512,7 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
     except Exception as e:
         debug_print(f"ERROR - Error in extract_all_functions: {str(e)}")
         debug_print(traceback.format_exc())
-        return functions_processed_count > 0
+        return False
 
 def handle_database_setup(config: AnalysisConfig) -> Optional[bool]:
     """Initializes databases and checks if analysis should proceed.
@@ -1743,6 +1797,7 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         pe_metadata: Dict[str, Any] = {}
         advanced_pe_info: Dict[str, Any] = {"rich_header": {}, "tls_callbacks": []}
         runtime_info: Dict[str, Any] = {}
+        delay_import_addresses: set = set()
 
         if extractor_core.pefile is None:
             debug_print("WARNING - 'pefile' not installed; skipping PE parsing-dependent extraction.")
@@ -1763,6 +1818,21 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
                     advanced_pe_info = extractor_core.extract_advanced_pe_info(pe_object, has_decompiler, config.force_reanalyze)
 
                 runtime_info = extractor_core.extract_runtime_info(pe_object) if config.extract_runtime_info else {}
+
+                # Pre-compute delay-load import addresses while PE object is open
+                # to avoid a redundant PE parse in build_import_address_set
+                delay_import_addresses: set = set()
+                try:
+                    if hasattr(pe_object, 'DIRECTORY_ENTRY_DELAY_IMPORT'):
+                        ida_base = ida_nalt.get_imagebase()
+                        pe_base = pe_object.OPTIONAL_HEADER.ImageBase
+                        for dll in pe_object.DIRECTORY_ENTRY_DELAY_IMPORT:
+                            for imp in dll.imports:
+                                if imp.address:
+                                    ea = (imp.address - pe_base) + ida_base
+                                    delay_import_addresses.add(ea)
+                except Exception as e:
+                    debug_print(f"WARNING - Failed pre-computing delay-import addresses: {e}")
 
             except Exception as e:
                 debug_print(f"ERROR - PE parsing failed: {e}")
@@ -1795,6 +1865,7 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
             entry_points_json, version_info, pe_metadata, advanced_pe_info, runtime_info,
             file_modified_date_str, idb_cache_path, has_decompiler,
             db_pragmas=config.get_sqlite_pragmas(),
+            delay_import_addresses=delay_import_addresses,
             **analysis_args
         )
         

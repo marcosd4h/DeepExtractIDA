@@ -45,9 +45,14 @@ def _get_ida_modules():
 
 
 # --- Logging configuration with proper log levels ---
-_LOG_LEVELS = {"TRACE": 10, "DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
+_LOG_LEVELS = {"TRACE": 5, "DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 _CURRENT_LOG_LEVEL_NAME = os.environ.get('EXTRACTOR_LOG_LEVEL', 'INFO').upper()
 _CURRENT_LOG_LEVEL = _LOG_LEVELS.get(_CURRENT_LOG_LEVEL_NAME, 20)
+
+# Fast boolean flag for zero-cost TRACE guards.
+# Callers can use `if TRACE_ENABLED: debug_print(...)` to avoid f-string
+# evaluation and function-call overhead when TRACE is disabled.
+TRACE_ENABLED: bool = _CURRENT_LOG_LEVEL <= _LOG_LEVELS["TRACE"]
 
 
 def set_log_level(level_name: str) -> None:
@@ -59,13 +64,14 @@ def set_log_level(level_name: str) -> None:
     Args:
         level_name: The log level name to set
     """
-    global _CURRENT_LOG_LEVEL_NAME, _CURRENT_LOG_LEVEL
+    global _CURRENT_LOG_LEVEL_NAME, _CURRENT_LOG_LEVEL, TRACE_ENABLED
     if not isinstance(level_name, str):
         return
     level_name_upper = level_name.upper()
     if level_name_upper in _LOG_LEVELS:
         _CURRENT_LOG_LEVEL_NAME = level_name_upper
         _CURRENT_LOG_LEVEL = _LOG_LEVELS[level_name_upper]
+        TRACE_ENABLED = _CURRENT_LOG_LEVEL <= _LOG_LEVELS["TRACE"]
         debug_print(f"Log level set to {level_name_upper}")
 
 
@@ -116,6 +122,11 @@ def debug_print(msg: str) -> None:
         debug_print("ERROR - Failed to process function")
         debug_print("This is an INFO message by default")
     """
+    # Fast path: skip TRACE messages immediately when TRACE is disabled.
+    # This avoids the _parse_log_level_from_message loop for the majority of calls.
+    if msg.startswith("TRACE") and _CURRENT_LOG_LEVEL > _LOG_LEVELS["TRACE"]:
+        return
+
     # Parse message level
     msg_level, level_name, clean_msg = _parse_log_level_from_message(msg)
     
@@ -151,7 +162,6 @@ def debug_print(msg: str) -> None:
                 with open(log_file, 'a', encoding='utf-8') as f:
                     f.write(log_message + "\n")
                     f.flush()
-                    os.fsync(f.fileno())
     except Exception as e:
         # Don't fail silently but don't crash either
         try:
@@ -416,6 +426,13 @@ def clear_caches() -> None:
     except ImportError:
         pass
 
+    # Clear import resolution caches
+    try:
+        from .import_resolution import clear_import_resolution_caches
+        clear_import_resolution_caches()
+    except ImportError:
+        pass
+
 
 def get_cache_stats() -> Dict[str, int]:
     """
@@ -437,6 +454,7 @@ __all__ = [
     'debug_print',
     'set_log_level',
     'get_log_level',
+    'TRACE_ENABLED',
     'log_trace',
     'log_debug',
     'log_info',
