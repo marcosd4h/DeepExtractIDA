@@ -19,6 +19,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 from .logging_utils import debug_print
+from .db_connection import connect_sqlite as _connect_sqlite
 from .cpp_generator import CppGenerator
 
 
@@ -578,7 +579,7 @@ def generate_module_profile(db_path: str,
     debug_print(f"Generating module profile for '{module_name}' ...")
 
     try:
-        conn = sqlite3.connect(db_path, timeout=20)
+        conn = _connect_sqlite(db_path, isolation_level="DEFERRED")
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
 

@@ -59,13 +59,13 @@ except ImportError:
     from extraction_tool.logging_utils import debug_print, get_log_level
 
 # Default SQLite PRAGMA settings for database connections
-_DEFAULT_SQLITE_PRAGMAS = {
-    "journal_mode": "WAL",
-    "synchronous": "NORMAL",
-    "cache_size": -2000000,
-    "temp_store": "MEMORY",
-    "busy_timeout_ms": 20000,
-}
+# Canonical definitions live in db_connection.py; these are thin aliases.
+from .db_connection import (
+    DEFAULT_SQLITE_PRAGMAS as _DEFAULT_SQLITE_PRAGMAS,
+    normalize_sqlite_pragmas as _normalize_sqlite_pragmas,
+    apply_sqlite_pragmas as _apply_sqlite_pragmas,
+    connect_sqlite as _connect_sqlite,
+)
 
 
 # =============================================================================
@@ -235,76 +235,6 @@ class ProgressTracker:
             debug_print(f"Committed batch {batch_num}. Progress: {progress_str}")
         else:
             debug_print(f"Progress: {progress_str}")
-
-
-def _normalize_sqlite_pragmas(pragmas: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Normalize and sanitize PRAGMA values to a safe subset."""
-    merged = dict(_DEFAULT_SQLITE_PRAGMAS)
-    if isinstance(pragmas, dict):
-        merged.update(pragmas)
-
-    # Allow-list string pragmas to avoid invalid values causing runtime failures
-    def _clean_upper(value: Any) -> Optional[str]:
-        if value is None:
-            return None
-        return str(value).strip().upper()
-
-    journal_mode = _clean_upper(merged.get("journal_mode")) or _DEFAULT_SQLITE_PRAGMAS["journal_mode"]
-    if journal_mode not in {"WAL", "DELETE", "TRUNCATE", "PERSIST", "MEMORY", "OFF"}:
-        journal_mode = _DEFAULT_SQLITE_PRAGMAS["journal_mode"]
-    merged["journal_mode"] = journal_mode
-
-    synchronous = _clean_upper(merged.get("synchronous")) or _DEFAULT_SQLITE_PRAGMAS["synchronous"]
-    if synchronous not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
-        synchronous = _DEFAULT_SQLITE_PRAGMAS["synchronous"]
-    merged["synchronous"] = synchronous
-
-    temp_store = _clean_upper(merged.get("temp_store")) or _DEFAULT_SQLITE_PRAGMAS["temp_store"]
-    if temp_store not in {"DEFAULT", "FILE", "MEMORY"}:
-        temp_store = _DEFAULT_SQLITE_PRAGMAS["temp_store"]
-    merged["temp_store"] = temp_store
-
-    try:
-        merged["cache_size"] = int(merged.get("cache_size"))
-    except Exception:
-        merged["cache_size"] = _DEFAULT_SQLITE_PRAGMAS["cache_size"]
-
-    try:
-        merged["busy_timeout_ms"] = int(merged.get("busy_timeout_ms"))
-    except Exception:
-        merged["busy_timeout_ms"] = _DEFAULT_SQLITE_PRAGMAS["busy_timeout_ms"]
-
-    return merged
-
-
-def _apply_sqlite_pragmas(conn: sqlite3.Connection, pragmas: Optional[Dict[str, Any]]) -> None:
-    """Apply configured SQLite PRAGMAs to a connection."""
-    p = _normalize_sqlite_pragmas(pragmas)
-    # Apply as early as possible after connect
-    conn.execute(f"PRAGMA journal_mode = {p['journal_mode']}")
-    conn.execute(f"PRAGMA synchronous = {p['synchronous']}")
-    conn.execute(f"PRAGMA cache_size = {p['cache_size']}")
-    conn.execute(f"PRAGMA temp_store = {p['temp_store']}")
-    conn.execute(f"PRAGMA busy_timeout = {p['busy_timeout_ms']}")
-
-
-def _connect_sqlite(
-    db_path: str,
-    pragmas: Optional[Dict[str, Any]] = None,
-    *,
-    timeout_seconds: float = 20.0,
-    isolation_level: str = "IMMEDIATE",
-    check_same_thread: bool = False,
-) -> sqlite3.Connection:
-    """Create a SQLite connection and apply PRAGMAs in one place."""
-    conn = sqlite3.connect(
-        db_path,
-        timeout=timeout_seconds,
-        isolation_level=isolation_level,
-        check_same_thread=check_same_thread,
-    )
-    _apply_sqlite_pragmas(conn, pragmas)
-    return conn
 
 
 def _get_connection(db_path: str, pragmas: Optional[Dict[str, Any]] = None) -> sqlite3.Connection:
@@ -752,6 +682,70 @@ def update_common_db(common_db_path: str, file_info: dict, analysis_db_path: str
     debug_print(f"ERROR - Failed to update common database after {max_retries} attempts "
                f"({total_seconds:.1f}s): {str(last_error)}")
     return False
+
+def _mark_analysis_failed(common_db_path: str, file_path: str,
+                          pragmas: Optional[Dict[str, Any]] = None,
+                          max_retries: int = 10, retry_delay: float = 2.0) -> bool:
+    """Sets the status of a file to 'FAILED' in the common tracking database.
+
+    Called when the analysis pipeline encounters an unrecoverable error after
+    locking the file.  Without this, the row stays in 'ANALYZING' until the
+    3-hour stale-lock timeout, blocking other batch instances from retrying.
+    """
+    debug_print(f"TRACE - Starting: _mark_analysis_failed for {file_path}")
+    overall_start = time.time()
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        conn = None
+        try:
+            conn = _connect_sqlite(
+                common_db_path,
+                pragmas=pragmas,
+                timeout_seconds=20.0,
+                isolation_level="DEFERRED",
+                check_same_thread=False,
+            )
+            conn.execute('''
+                UPDATE analyzed_files
+                SET status = 'FAILED',
+                    analysis_completion_timestamp = CURRENT_TIMESTAMP
+                WHERE file_path = ? AND status = 'ANALYZING'
+            ''', (file_path,))
+            conn.commit()
+
+            duration = time.time() - overall_start
+            debug_print(f"Marked file as FAILED in common DB ({duration:.4f}s)")
+            return True
+
+        except sqlite3.OperationalError as e:
+            last_error = e
+            if "database is locked" in str(e) or "database is busy" in str(e):
+                elapsed = time.time() - overall_start
+                debug_print(f"WARNING - Common DB locked during _mark_analysis_failed "
+                           f"(attempt {attempt}/{max_retries}, elapsed {elapsed:.1f}s). "
+                           f"Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                continue
+            debug_print(f"ERROR - Error marking analysis as failed: {str(e)}")
+            return False
+
+        except Exception as e:
+            debug_print(f"ERROR - Error marking analysis as failed: {str(e)}")
+            return False
+
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    total_seconds = time.time() - overall_start
+    debug_print(f"ERROR - Failed to mark analysis as FAILED after {max_retries} attempts "
+               f"({total_seconds:.1f}s): {str(last_error)}")
+    return False
+
 
 def parse_arguments() -> Optional[dict]:
     """
@@ -1407,89 +1401,104 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                 if f: ida_funcs.reanalyze_function(f)
             _profile_add_stage(profile, "reanalyze_functions", time.perf_counter() - reanalyze_start)
             
-            # Process functions -- clear old data in the same transaction as
-            # the first batch insert so partial failure leaves old data intact.
+            # Process functions -- use a single enclosing transaction so that
+            # a mid-extraction crash rolls back ALL changes atomically, leaving
+            # the old data intact.  Savepoints flush batches to disk without
+            # releasing the outer transaction lock.
+            extraction_succeeded = False
             cursor.execute('BEGIN IMMEDIATE')
-            cursor.execute('DELETE FROM functions')
-            cursor.execute('DELETE FROM function_xrefs')
-            batch_count = 0
-            
-            for idx, ea in enumerate(function_addresses):
-                func_total_start = time.perf_counter()
-                func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id, import_addresses=import_addresses, profile=profile)
-                func_total_duration = time.perf_counter() - func_total_start
-                if profile_enabled:
-                    func_name = extractor_core.get_raw_function_name(ea)
-                    _profile_add_stage(profile, "process_function_total", func_total_duration, ea, func_name)
-                    _profile_track_slowest(profile, func_total_duration, ea, func_name)
+            try:
+                cursor.execute('DELETE FROM functions')
+                cursor.execute('DELETE FROM function_xrefs')
+                cursor.execute('SAVEPOINT batch_sp')
+                batch_count = 0
                 
-                if func_data:
-                    # Extract raw xref lists before DB insert (not in functions table schema)
-                    raw_inbound = func_data.pop('_raw_simple_inbound', [])
-                    raw_outbound = func_data.pop('_raw_simple_outbound', [])
-                    func_id = func_data['function_id']
+                for idx, ea in enumerate(function_addresses):
+                    func_total_start = time.perf_counter()
+                    func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id, import_addresses=import_addresses, profile=profile)
+                    func_total_duration = time.perf_counter() - func_total_start
+                    if profile_enabled:
+                        func_name = extractor_core.get_raw_function_name(ea)
+                        _profile_add_stage(profile, "process_function_total", func_total_duration, ea, func_name)
+                        _profile_track_slowest(profile, func_total_duration, ea, func_name)
+                    
+                    if func_data:
+                        # Extract raw xref lists before DB insert (not in functions table schema)
+                        raw_inbound = func_data.pop('_raw_simple_inbound', [])
+                        raw_outbound = func_data.pop('_raw_simple_outbound', [])
+                        func_id = func_data['function_id']
 
-                    insert_start = time.perf_counter()
-                    cursor.execute('''
-                        INSERT INTO functions (
-                            function_id, function_signature, function_signature_extended, mangled_name, function_name,
-                            assembly_code, decompiled_code, inbound_xrefs, outbound_xrefs,
-                            simple_inbound_xrefs, simple_outbound_xrefs,
-                            vtable_contexts, global_var_accesses, loop_analysis, stack_frame,
-                            string_literals, dangerous_api_calls, analysis_errors
-                        ) VALUES (
-                            :function_id, :function_signature, :function_signature_extended, :mangled_name, :function_name,
-                            :assembly_code, :decompiled_code, :inbound_xrefs, :outbound_xrefs,
-                            :simple_inbound_xrefs, :simple_outbound_xrefs,
-                            :vtable_contexts, :global_var_accesses, :loop_analysis, :stack_frame,
-                            :string_literals, :dangerous_api_calls, :analysis_errors
-                        )
-                    ''', func_data)
-
-                    # Populate normalized function_xrefs table
-                    for xref in raw_outbound:
+                        insert_start = time.perf_counter()
                         cursor.execute('''
-                            INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
-                            VALUES (?, ?, ?, ?, ?, ?, 'outbound')
-                        ''', (
-                            func_id,
-                            xref.get('function_id'),
-                            xref.get('function_name', ''),
-                            xref.get('module_name'),
-                            xref.get('function_type', 0),
-                            xref.get('xref_type'),
-                        ))
-                    for xref in raw_inbound:
-                        cursor.execute('''
-                            INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
-                            VALUES (?, ?, ?, ?, ?, ?, 'inbound')
-                        ''', (
-                            xref.get('function_id'),
-                            func_id,
-                            xref.get('function_name', ''),
-                            xref.get('module_name'),
-                            xref.get('function_type', 0),
-                            xref.get('xref_type'),
-                        ))
+                            INSERT INTO functions (
+                                function_id, function_signature, function_signature_extended, mangled_name, function_name,
+                                assembly_code, decompiled_code, inbound_xrefs, outbound_xrefs,
+                                simple_inbound_xrefs, simple_outbound_xrefs,
+                                vtable_contexts, global_var_accesses, loop_analysis, stack_frame,
+                                string_literals, dangerous_api_calls, analysis_errors
+                            ) VALUES (
+                                :function_id, :function_signature, :function_signature_extended, :mangled_name, :function_name,
+                                :assembly_code, :decompiled_code, :inbound_xrefs, :outbound_xrefs,
+                                :simple_inbound_xrefs, :simple_outbound_xrefs,
+                                :vtable_contexts, :global_var_accesses, :loop_analysis, :stack_frame,
+                                :string_literals, :dangerous_api_calls, :analysis_errors
+                            )
+                        ''', func_data)
 
-                    _profile_add_stage(profile, "db_insert", time.perf_counter() - insert_start)
-                    functions_processed_count += 1
-                    batch_count += 1
+                        # Populate normalized function_xrefs table
+                        for xref in raw_outbound:
+                            cursor.execute('''
+                                INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
+                                VALUES (?, ?, ?, ?, ?, ?, 'outbound')
+                            ''', (
+                                func_id,
+                                xref.get('function_id'),
+                                xref.get('function_name', ''),
+                                xref.get('module_name'),
+                                xref.get('function_type', 0),
+                                xref.get('xref_type'),
+                            ))
+                        for xref in raw_inbound:
+                            cursor.execute('''
+                                INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
+                                VALUES (?, ?, ?, ?, ?, ?, 'inbound')
+                            ''', (
+                                xref.get('function_id'),
+                                func_id,
+                                xref.get('function_name', ''),
+                                xref.get('module_name'),
+                                xref.get('function_type', 0),
+                                xref.get('xref_type'),
+                            ))
+
+                        _profile_add_stage(profile, "db_insert", time.perf_counter() - insert_start)
+                        functions_processed_count += 1
+                        batch_count += 1
+                    
+                    # Flush batch to disk via savepoint (stays inside outer transaction)
+                    if batch_count >= BATCH_SIZE:
+                        commit_start = time.perf_counter()
+                        cursor.execute('RELEASE SAVEPOINT batch_sp')
+                        cursor.execute('SAVEPOINT batch_sp')
+                        _profile_add_stage(profile, "db_commit", time.perf_counter() - commit_start)
+                        batch_count = 0
+                        current_batch += 1
+                        progress.update(functions_processed_count)
+                        progress.log_progress(batch_num=current_batch)
                 
-                # Batch commit
-                if batch_count >= BATCH_SIZE:
-                    commit_start = time.perf_counter()
-                    cursor.execute('COMMIT')
-                    cursor.execute('BEGIN IMMEDIATE')
-                    _profile_add_stage(profile, "db_commit", time.perf_counter() - commit_start)
-                    batch_count = 0
-                    current_batch += 1
-                    progress.update(functions_processed_count)
-                    progress.log_progress(batch_num=current_batch)
-            
-            final_commit_start = time.perf_counter()
-            cursor.execute('COMMIT')
-            _profile_add_stage(profile, "db_commit", time.perf_counter() - final_commit_start)
+                final_commit_start = time.perf_counter()
+                cursor.execute('COMMIT')
+                _profile_add_stage(profile, "db_commit", time.perf_counter() - final_commit_start)
+                extraction_succeeded = True
+
+            except Exception as extraction_err:
+                debug_print(f"ERROR - Extraction loop failed, rolling back all changes: {extraction_err}")
+                try:
+                    cursor.execute('ROLLBACK')
+                except Exception:
+                    pass
+                raise
+
             
         duration = time.time() - overall_start_time
         debug_print(f"TRACE - Finished: extract_all_functions. Duration: {duration:.4f}s")
@@ -1668,6 +1677,13 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
         with get_db_connection(sqlite_db_path, pragmas=config.get_sqlite_pragmas()) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+
+            # Stream rows and convert to lightweight dicts immediately so the
+            # heavy sqlite3.Row objects (carrying assembly + decompiled text)
+            # are released as soon as each row is processed.
+            _CPP_COLS = ('function_id', 'function_name', 'function_signature',
+                         'function_signature_extended', 'mangled_name',
+                         'assembly_code', 'decompiled_code')
             cursor.execute('''
                 SELECT function_id, function_name, function_signature,
                        function_signature_extended, mangled_name, assembly_code,
@@ -1677,9 +1693,9 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
                 AND decompiled_code != 'Decompiler not available'
                 AND decompiled_code NOT LIKE 'Decompilation failed:%'
             ''')
-            functions_for_cpp = cursor.fetchall()
+            functions_for_cpp = [dict(zip(_CPP_COLS, row)) for row in cursor]
 
-            # Include failed decompilation entries in function_index.json with file=null.
+            _FAIL_COLS = ('function_id', 'function_name', 'mangled_name', 'assembly_code')
             cursor.execute('''
                 SELECT function_id, function_name, mangled_name, assembly_code
                 FROM functions
@@ -1690,7 +1706,7 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
                     OR decompiled_code LIKE 'Decompilation failed:%'
                 )
             ''')
-            failed_functions_for_index = cursor.fetchall()
+            failed_functions_for_index = [dict(zip(_FAIL_COLS, row)) for row in cursor]
 
             if functions_for_cpp or failed_functions_for_index:
                 return generator.generate_cpp_files_with_markdown(
@@ -1753,7 +1769,12 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
     caps = check_dependencies()
     for w in caps.get("warnings", []):
         debug_print(f"WARNING - Dependency check: {w}")
-        
+
+    # Track whether we locked the file in the common DB so we can mark it
+    # FAILED on any error path instead of leaving a stale ANALYZING lock.
+    file_locked_for_analysis = False
+    return_code = 1
+
     try:
         file_hashes = extractor_core.calculate_file_hashes(str(config.input_file_path))
         if not file_hashes:
@@ -1768,6 +1789,9 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         if setup_result is False:
             # File already analyzed, no work needed -- not an error
             return 0
+
+        # Past this point the file is locked as ANALYZING in the common DB
+        file_locked_for_analysis = True
         
         # Track IDA auto-analysis time
         timer.start_phase("ida_auto_analysis")
@@ -1836,7 +1860,8 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
 
             except Exception as e:
                 debug_print(f"ERROR - PE parsing failed: {e}")
-                return 1
+                return_code = 1
+                return return_code
             finally:
                 if pe_object is not None:
                     try:
@@ -1882,7 +1907,8 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         
         if not functions_result:
             timer.print_summary(file_name)
-            return 1
+            return_code = 1
+            return return_code
         
         # Module Profile Generation (always runs, independent of --generate-cpp)
         timer.start_phase("module_profile")
@@ -1922,16 +1948,27 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
         if not handle_database_updates(config, pe_data):
             timer.end_phase("database_finalization")
             timer.print_summary(file_name)
-            return 1
+            return_code = 1
+            return return_code
         
         timer.end_phase("database_finalization")
         
         # Print final summary
         timer.print_summary(file_name)
             
-        return 0
+        return_code = 0
+        return return_code
         
     except Exception as e:
         debug_print(f"ERROR - Pipeline failed: {str(e)}")
         debug_print(traceback.format_exc())
-        return 1
+        return_code = 1
+        return return_code
+
+    finally:
+        if file_locked_for_analysis and return_code != 0:
+            _mark_analysis_failed(
+                str(config.common_db_path),
+                str(config.input_file_path),
+                pragmas=config.get_common_db_pragmas(),
+            )

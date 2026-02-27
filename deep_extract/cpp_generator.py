@@ -14,6 +14,7 @@ from typing import List, Set, Tuple, Optional, Any
 
 # Use consistent logging approach across modules
 from .logging_utils import debug_print
+from .db_connection import connect_sqlite as _connect_sqlite
 
 
 class CppGenerator:
@@ -771,7 +772,7 @@ class CppGenerator:
             List of file_info rows from the database
         """
         try:
-            with sqlite3.connect(db_path, timeout=20) as conn:
+            with _connect_sqlite(db_path, isolation_level="DEFERRED") as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 
@@ -931,7 +932,7 @@ class CppGenerator:
         # Try to get function signatures from database for richer output
         func_details = []
         try:
-            with sqlite3.connect(db_path, timeout=20) as conn:
+            with _connect_sqlite(db_path, isolation_level="DEFERRED") as conn:
                 conn.row_factory = sqlite3.Row
                 cursor = conn.cursor()
                 cursor.execute("""
@@ -1125,7 +1126,7 @@ class CppGenerator:
             
             # Get function details from database
             try:
-                with sqlite3.connect(db_path, timeout=20) as conn:
+                with _connect_sqlite(db_path, isolation_level="DEFERRED") as conn:
                     conn.row_factory = sqlite3.Row
                     cursor = conn.cursor()
                     cursor.execute("""
@@ -1205,7 +1206,7 @@ def generate_standalone_markdown_documentation(db_path: str, output_dir: str, mo
         # Connect to database and extract function information
         conn = None
         try:
-            conn = sqlite3.connect(db_path, timeout=20)
+            conn = _connect_sqlite(db_path, isolation_level="DEFERRED")
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
