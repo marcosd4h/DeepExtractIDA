@@ -5,7 +5,6 @@ import os
 import pathlib
 import sqlite3
 import sys
-import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -390,7 +389,8 @@ def init_sqlite_db(db_path: str, force_reanalyze: bool = False, pragmas: Optiona
                     target_module TEXT,
                     function_type INTEGER DEFAULT 0,
                     xref_type TEXT,
-                    direction TEXT NOT NULL
+                    direction TEXT NOT NULL,
+                    UNIQUE(source_id, target_id, target_name, target_module, xref_type, direction)
                 )
             ''')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_fxrefs_source ON function_xrefs(source_id)')
@@ -993,39 +993,14 @@ def _profile_track_slowest(profile: Optional[Dict[str, Any]], duration: float, e
         entries[min_idx] = item
 
 
-def _decompile_with_timeout(func, timeout_seconds: float):
-    """Run ida_hexrays.decompile() in a daemon thread with a hard timeout.
+def _decompile_function(func):
+    """Call ida_hexrays.decompile() on the main thread.
 
-    The decompile call executes in a background thread while the main thread
-    waits via ``join(timeout)``.  If the worker does not finish in time it is
-    abandoned (left as a leaked daemon thread) and ``TimeoutError`` is raised
-    so the caller can skip the function and continue.  The abandoned thread
-    will be cleaned up when the IDA process exits.
-
-    This avoids the previous ``PyThreadState_SetAsyncExc`` approach which
-    cannot interrupt a C-level call that never returns to Python bytecode.
+    IDA's Hex-Rays decompile() API **must** run on the main thread; calling it
+    from a background thread raises "Function can be called from the main
+    thread only".
     """
-    result_holder: List = []
-    error_holder: List = []
-
-    def _worker():
-        try:
-            cfunc = ida_hexrays.decompile(func)
-            result_holder.append(cfunc)
-        except Exception as exc:
-            error_holder.append(exc)
-
-    worker = threading.Thread(target=_worker, daemon=True)
-    worker.start()
-    worker.join(timeout_seconds)
-
-    if worker.is_alive():
-        raise TimeoutError(
-            f"Decompilation timed out after {timeout_seconds:.0f}s"
-        )
-    if error_holder:
-        raise error_holder[0]
-    return result_holder[0] if result_holder else None
+    return ida_hexrays.decompile(func)
 
 
 def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int], import_addresses: Optional[set] = None, profile: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -1083,28 +1058,18 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
                 if func_size > constants.DECOMPILATION_SIZE_WARNING:
                     extractor_core.debug_print(f"WARNING - Large function at 0x{ea:X} ({func_size} bytes).")
 
-                decompiler = _decompile_with_timeout(func, constants.DECOMPILATION_TIMEOUT)
+                decompiler = _decompile_function(func)
                 if decompiler:
                     decompiled_code = str(decompiler)
                     if not decompiled_code or len(decompiled_code.strip()) < constants.DECOMPILATION_MIN_OUTPUT_LENGTH:
                         decompiled_code = "Decompilation produced empty output"
                 else:
                     decompiled_code = "Decompiler returned None"
-            except TimeoutError as te:
-                decompiled_code = f"Decompilation failed: {str(te)}"
-                extractor_core.debug_print(
-                    f"WARNING - Decompilation timed out for {demangled_name} at 0x{ea:X} "
-                    f"after {constants.DECOMPILATION_TIMEOUT}s — skipping decompilation for this function"
-                )
-                analysis_errors.append({
-                    "stage": "decompile",
-                    "severity": "warning",
-                    "error": str(te),
-                    "reason": "timeout",
-                    "timeout_seconds": constants.DECOMPILATION_TIMEOUT,
-                })
             except Exception as e:
                 decompiled_code = f"Decompilation failed: {str(e)}"
+                extractor_core.debug_print(
+                    f"WARNING - Decompilation failed for {demangled_name} at 0x{ea:X}: {str(e)}"
+                )
                 analysis_errors.append({"stage": "decompile", "error": str(e)})
             finally:
                 # Explicitly release the cfuncptr_t object to free type info references.
@@ -1114,6 +1079,17 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             _profile_add_stage(profile, "decompile", time.perf_counter() - decompile_start, ea, demangled_name)
         else:
             decompiled_code = "Decompiler not available"
+
+        # Fallback: derive extended_signature from decompiled code when IDA type info was unavailable
+        if not extended_signature and decompiled_code and '{' in decompiled_code:
+            try:
+                sig_part = decompiled_code[:decompiled_code.index('{')].rstrip()
+                # Remove leading comment lines (e.g. "// Hidden C++ exception states: ...")
+                lines = [l for l in sig_part.split('\n') if not l.lstrip().startswith('//')]
+                if lines:
+                    extended_signature = ' '.join(l.strip() for l in lines if l.strip())
+            except Exception:
+                pass
 
         # Cross-references
         xref_start = time.perf_counter()
@@ -1448,7 +1424,7 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                         # Populate normalized function_xrefs table
                         for xref in raw_outbound:
                             cursor.execute('''
-                                INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
+                                INSERT OR IGNORE INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
                                 VALUES (?, ?, ?, ?, ?, ?, 'outbound')
                             ''', (
                                 func_id,
@@ -1460,7 +1436,7 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                             ))
                         for xref in raw_inbound:
                             cursor.execute('''
-                                INSERT INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
+                                INSERT OR IGNORE INTO function_xrefs (source_id, target_id, target_name, target_module, function_type, xref_type, direction)
                                 VALUES (?, ?, ?, ?, ?, ?, 'inbound')
                             ''', (
                                 xref.get('function_id'),

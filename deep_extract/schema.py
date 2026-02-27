@@ -97,6 +97,7 @@ def get_expected_schema() -> Dict[str, List[str]]:
             'function_type INTEGER DEFAULT 0',
             'xref_type TEXT',
             'direction TEXT NOT NULL',
+            'UNIQUE(source_id, target_id, target_name, target_module, xref_type, direction)',
         ]
     }
 
