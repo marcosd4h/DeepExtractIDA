@@ -249,6 +249,95 @@ Note: `check_analyzed_files.py` compares flags with `force_reanalyze` removed. `
 
 **Note**: JSON fields in `file_info`/`functions` are stored as TEXT (serialized JSON). Most fields use `json_safety.to_json_safe()`, so values may be `"null"` or include truncation metadata.
 
+#### Table: `function_xrefs`
+
+**Purpose**: Normalized, relational cross-reference table that represents the call graph and data-reference graph as individual rows. Each row is a single directed edge between a source function and a target (which may be an internal function, an imported API, a data reference, or a vtable slot).
+
+This table complements the JSON xref columns on the `functions` table (`simple_inbound_xrefs`, `simple_outbound_xrefs`, `inbound_xrefs`, `outbound_xrefs`). The JSON columns are optimized for per-function reads (loading one function's context), while `function_xrefs` is optimized for cross-module graph queries (traversals, reachability, call-chain analysis) using standard SQL joins and index lookups.
+
+| Column Name     | Data Type | Description                                                                                                                                                          |
+| :-------------- | :-------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`            | INTEGER   | **PRIMARY KEY** (autoincrement). Row identifier.                                                                                                                     |
+| `source_id`     | INTEGER   | `function_id` of the calling/referencing function. NULL for data-only inbound references with no resolved source function.                                           |
+| `target_id`     | INTEGER   | `function_id` of the called/referenced function. NULL when the target is an external import, data reference, or unresolved symbol.                                   |
+| `target_name`   | TEXT      | Name of the target function or symbol (e.g., `"CreateProcessAsUserW"`, `"AiCheckForAdminUser"`, `"_SVCHOST_GLOBAL_DATA * g_pSvchostSharedGlobals"`).                |
+| `target_module` | TEXT      | Where the target lives: `"internal"` for same-module functions, DLL name for imports (e.g., `"kernelbase.dll"`), `"data"` for globals, `"vtable"` for vtable slots, `"static_library"` for statically linked library functions. |
+| `function_type` | INTEGER   | Target classification using IDA function type constants: `FT_UNK=0`, `FT_GEN=1` (internal), `FT_LIB=2` (static library), `FT_API=3` (import), `FT_MEM=4` (data), `FT_VTB=8` (vtable/unknown offset). |
+| `xref_type`     | TEXT      | IDA cross-reference type: `"Call Near"`, `"Offset"`, `"Read"`, `"Write"`, etc.                                                                                       |
+| `direction`     | TEXT      | Edge direction relative to the function being processed: `"outbound"` (this function calls/references the target) or `"inbound"` (the target calls/references this function). |
+
+**Uniqueness constraint**: `UNIQUE(source_id, target_id, target_name, target_module, xref_type, direction)` prevents duplicate edges. Insertion uses `INSERT OR IGNORE` to silently drop duplicates from IDA's raw xref data.
+
+**Relationship to JSON xref columns**: The `function_xrefs` rows are derived from the same raw xref data as `simple_inbound_xrefs` and `simple_outbound_xrefs`. Both representations are populated during the same extraction pass. The JSON columns retain the original per-function grouping; the `function_xrefs` table flattens all edges into a single queryable structure.
+
+##### Use Cases
+
+**Reverse lookup** -- find all callers of a specific function:
+
+```sql
+SELECT DISTINCT f.function_name
+FROM function_xrefs x
+JOIN functions f ON f.function_id = x.source_id
+WHERE x.target_name = 'CreateProcessAsUserW'
+  AND x.direction = 'outbound';
+```
+
+**Internal call graph reconstruction**:
+
+```sql
+SELECT s.function_name AS caller, t.function_name AS callee
+FROM function_xrefs x
+JOIN functions s ON s.function_id = x.source_id
+JOIN functions t ON t.function_id = x.target_id
+WHERE x.direction = 'outbound'
+  AND x.target_module = 'internal';
+```
+
+**Import dependency surface** -- which DLLs does a function depend on:
+
+```sql
+SELECT DISTINCT x.target_module, x.target_name
+FROM function_xrefs x
+WHERE x.source_id = ?
+  AND x.direction = 'outbound'
+  AND x.function_type = 3;  -- FT_API
+```
+
+**Dead code detection** -- functions with no inbound references:
+
+```sql
+SELECT f.function_name
+FROM functions f
+WHERE f.function_id NOT IN (
+    SELECT target_id FROM function_xrefs
+    WHERE direction = 'inbound' AND target_id IS NOT NULL
+);
+```
+
+**Transitive call chain** -- two-hop callers of a function (who calls the callers):
+
+```sql
+SELECT DISTINCT f2.function_name AS indirect_caller
+FROM function_xrefs x1
+JOIN function_xrefs x2 ON x2.target_id = x1.source_id
+JOIN functions f2 ON f2.function_id = x2.source_id
+WHERE x1.target_name = 'NtDuplicateToken'
+  AND x1.direction = 'outbound'
+  AND x2.direction = 'outbound'
+  AND x2.target_module = 'internal';
+```
+
+**Global data access analysis** -- find all functions that read a specific global:
+
+```sql
+SELECT f.function_name
+FROM function_xrefs x
+JOIN functions f ON f.function_id = x.source_id
+WHERE x.target_name LIKE '%g_pSvchostSharedGlobals%'
+  AND x.direction = 'outbound'
+  AND x.xref_type = 'Read';
+```
+
 #### Table: `schema_version`
 
 | Column Name         | Data Type | Description                                     |
@@ -260,13 +349,17 @@ Note: `check_analyzed_files.py` compares flags with `force_reanalyze` removed. `
 
 #### Indices
 
-| Index Name                 | Table       | Column(s)                           | Purpose                                 |
-| :------------------------- | :---------- | :---------------------------------- | :-------------------------------------- |
-| `idx_file_info_lower_ext`  | `file_info` | `LOWER(file_extension)`             | Case-insensitive extension search.      |
-| `idx_file_info_lower_name` | `file_info` | `LOWER(file_name)`                  | Case-insensitive filename search.       |
-| `idx_functions_mangled`    | `functions` | `mangled_name COLLATE NOCASE`       | Case-insensitive mangled name lookups.  |
-| `idx_functions_name`       | `functions` | `function_name COLLATE NOCASE`      | Case-insensitive function name lookups. |
-| `idx_functions_signature`  | `functions` | `function_signature COLLATE NOCASE` | Case-insensitive signature search.      |
+| Index Name                 | Table            | Column(s)                           | Purpose                                  |
+| :------------------------- | :--------------- | :---------------------------------- | :--------------------------------------- |
+| `idx_file_info_lower_ext`  | `file_info`      | `LOWER(file_extension)`             | Case-insensitive extension search.       |
+| `idx_file_info_lower_name` | `file_info`      | `LOWER(file_name)`                  | Case-insensitive filename search.        |
+| `idx_functions_mangled`    | `functions`      | `mangled_name COLLATE NOCASE`       | Case-insensitive mangled name lookups.   |
+| `idx_functions_name`       | `functions`      | `function_name COLLATE NOCASE`      | Case-insensitive function name lookups.  |
+| `idx_functions_signature`  | `functions`      | `function_signature COLLATE NOCASE` | Case-insensitive signature search.       |
+| `idx_fxrefs_source`        | `function_xrefs` | `source_id`                         | Fast caller lookups and outbound joins.  |
+| `idx_fxrefs_target`        | `function_xrefs` | `target_id`                         | Fast callee lookups and inbound joins.   |
+| `idx_fxrefs_target_name`   | `function_xrefs` | `target_name COLLATE NOCASE`        | Name-based target search (e.g., imports).|
+| `idx_fxrefs_direction`     | `function_xrefs` | `direction`                         | Filter by inbound/outbound direction.    |
 
 ---
 
@@ -381,7 +474,7 @@ Common per‑field caps (list limits):
 ## Usage Notes for AI Agents
 
 1.  **Registry Discovery**: Query `analyzed_files.db` to find individual module databases and verify analysis completeness across software packages.
-2.  **Call Chain Reconstruction**: Use `simple_outbound_xrefs` for lightweight call chains. For indirect calls/jump tables/vtables, use `outbound_xrefs` entries with `indirect_call_info`, `jump_table_*`, or `vtable_info`.
-3.  **Cross-Reference Analysis**: Utilize `inbound_xrefs` and `outbound_xrefs` to identify data and control flow relationships.
+2.  **Call Chain Reconstruction**: Use `function_xrefs` for efficient SQL-based call chain queries. For lightweight per-function reads, use `simple_outbound_xrefs`. For indirect calls/jump tables/vtables, use `outbound_xrefs` entries with `indirect_call_info`, `jump_table_*`, or `vtable_info`.
+3.  **Cross-Reference Analysis**: Use `function_xrefs` with SQL joins for graph queries (reverse lookups, transitive callers, import surface analysis). Use `inbound_xrefs` and `outbound_xrefs` JSON columns when full xref detail is needed for a single function.
 4.  **Heuristic Data Retrieval**: Use SQL `JSON_EXTRACT` to filter functions by technical metrics such as loop complexity, stack size, or anti-debug indicators.
 5.  **Technical Verification**: Correlate observations in `decompiled_code` with the raw `assembly_code` and `stack_frame` (canary status) for technical validation.

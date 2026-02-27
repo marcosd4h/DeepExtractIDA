@@ -993,17 +993,73 @@ def _profile_track_slowest(profile: Optional[Dict[str, Any]], duration: float, e
         entries[min_idx] = item
 
 
-def _decompile_function(func):
-    """Call ida_hexrays.decompile() on the main thread.
+class _DecompileTimeoutHook(ida_hexrays.Hexrays_Hooks):
+    """Hexrays_Hooks subclass that cancels decompilation when a timeout expires.
+
+    Pipeline callbacks that return microcode error codes (microcode,
+    preoptimized, locopt, glbopt, prealloc) are overridden to check
+    elapsed wall-clock time and return MERR_CANCELED when the budget is
+    exhausted.  The hook is installed/removed per-call via start()/stop().
+    """
+
+    MERR_CANCELED = -18  # ida_hexrays.MERR_CANCELED
+
+    def __init__(self, timeout_seconds: float):
+        super().__init__()
+        self._timeout = timeout_seconds
+        self._deadline: float = 0.0
+
+    def _check(self) -> int:
+        if time.monotonic() >= self._deadline:
+            return self.MERR_CANCELED
+        return 0
+
+    # --- pipeline stage callbacks that accept merror_t returns ---
+    def microcode(self, mba):
+        return self._check()
+
+    def preoptimized(self, mba):
+        return self._check()
+
+    def locopt(self, mba):
+        return self._check()
+
+    def glbopt(self, mba):
+        return self._check()
+
+    def prealloc(self, mba):
+        return self._check()
+
+    def start(self):
+        self._deadline = time.monotonic() + self._timeout
+        self.hook()
+
+    def stop(self):
+        self.unhook()
+
+
+def _decompile_function(func, timeout_seconds=None):
+    """Call ida_hexrays.decompile() on the main thread with optional timeout.
 
     IDA's Hex-Rays decompile() API **must** run on the main thread; calling it
     from a background thread raises "Function can be called from the main
     thread only".
+
+    When *timeout_seconds* is given, a Hexrays_Hooks subclass is installed
+    that returns MERR_CANCELED from pipeline-stage callbacks once the
+    deadline expires, causing decompile() to raise DecompilationFailure.
     """
+    if timeout_seconds is not None and timeout_seconds > 0:
+        hook = _DecompileTimeoutHook(timeout_seconds)
+        hook.start()
+        try:
+            return ida_hexrays.decompile(func)
+        finally:
+            hook.stop()
     return ida_hexrays.decompile(func)
 
 
-def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int], import_addresses: Optional[set] = None, profile: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler: bool, options: Dict[str, bool], addr_to_id: Dict[int, int], import_addresses: Optional[set] = None, profile: Optional[Dict[str, Any]] = None, decompile_blacklist: Optional[set] = None) -> Optional[Dict[str, Any]]:
     """
     Extracts data for a single function.
     
@@ -1051,32 +1107,69 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
         # Decompilation
         decompiled_code = ""
         if has_decompiler:
-            decompile_start = time.perf_counter()
-            decompiler = None
-            try:
-                func_size = func.end_ea - func.start_ea
-                if func_size > constants.DECOMPILATION_SIZE_WARNING:
-                    extractor_core.debug_print(f"WARNING - Large function at 0x{ea:X} ({func_size} bytes).")
-
-                decompiler = _decompile_function(func)
-                if decompiler:
-                    decompiled_code = str(decompiler)
-                    if not decompiled_code or len(decompiled_code.strip()) < constants.DECOMPILATION_MIN_OUTPUT_LENGTH:
-                        decompiled_code = "Decompilation produced empty output"
-                else:
-                    decompiled_code = "Decompiler returned None"
-            except Exception as e:
-                decompiled_code = f"Decompilation failed: {str(e)}"
+            # Check per-module blacklist before attempting decompilation
+            blacklisted = False
+            if decompile_blacklist:
+                for pattern in decompile_blacklist:
+                    if pattern == "*" or pattern in demangled_name:
+                        blacklisted = True
+                        break
+            if blacklisted:
+                decompiled_code = f"Decompilation skipped (blacklisted)"
                 extractor_core.debug_print(
-                    f"WARNING - Decompilation failed for {demangled_name} at 0x{ea:X}: {str(e)}"
+                    f"INFO - Skipping decompilation for blacklisted function {demangled_name} at 0x{ea:X}"
                 )
-                analysis_errors.append({"stage": "decompile", "error": str(e)})
-            finally:
-                # Explicitly release the cfuncptr_t object to free type info references.
-                # Without this, IDA's type system accumulates leaked refcounts across
-                # thousands of decompilations, causing "Type info leak" warnings on exit.
+                analysis_errors.append({"stage": "decompile", "reason": "blacklisted"})
+            else:
+                decompile_start = time.perf_counter()
                 decompiler = None
-            _profile_add_stage(profile, "decompile", time.perf_counter() - decompile_start, ea, demangled_name)
+                try:
+                    func_size = func.end_ea - func.start_ea
+                    if func_size > constants.DECOMPILATION_SIZE_WARNING:
+                        extractor_core.debug_print(f"WARNING - Large function at 0x{ea:X} ({func_size} bytes).")
+
+                    extractor_core.debug_print(f"TRACE - Decompiling {demangled_name} at 0x{ea:X}")
+                    decompiler = _decompile_function(func, timeout_seconds=constants.DECOMPILATION_TIMEOUT)
+                    if decompiler:
+                        decompiled_code = str(decompiler)
+                        if not decompiled_code or len(decompiled_code.strip()) < constants.DECOMPILATION_MIN_OUTPUT_LENGTH:
+                            decompiled_code = "Decompilation produced empty output"
+                            extractor_core.debug_print(
+                                f"WARNING - Decompilation produced empty output for {demangled_name} at 0x{ea:X}"
+                            )
+                            analysis_errors.append({"stage": "decompile", "reason": "empty_output"})
+                    else:
+                        decompiled_code = "Decompiler returned None"
+                        extractor_core.debug_print(
+                            f"WARNING - Decompiler returned None for {demangled_name} at 0x{ea:X}"
+                        )
+                        analysis_errors.append({"stage": "decompile", "reason": "returned_none"})
+                except Exception as e:
+                    err_str = str(e)
+                    if "canceled" in err_str.lower():
+                        decompiled_code = "Decompilation timed out"
+                        extractor_core.debug_print(
+                            f"WARNING - Decompilation timed out for {demangled_name} at 0x{ea:X} "
+                            f"(>{constants.DECOMPILATION_TIMEOUT}s)"
+                        )
+                        analysis_errors.append({"stage": "decompile", "reason": "timeout", "timeout_seconds": constants.DECOMPILATION_TIMEOUT})
+                    else:
+                        decompiled_code = f"Decompilation failed: {err_str}"
+                        extractor_core.debug_print(
+                            f"WARNING - Decompilation failed for {demangled_name} at 0x{ea:X}: {err_str}"
+                        )
+                        analysis_errors.append({"stage": "decompile", "error": err_str})
+                finally:
+                    # Explicitly release the cfuncptr_t object to free type info references.
+                    # Without this, IDA's type system accumulates leaked refcounts across
+                    # thousands of decompilations, causing "Type info leak" warnings on exit.
+                    decompiler = None
+                decompile_duration = time.perf_counter() - decompile_start
+                if decompile_duration >= constants.DECOMPILATION_TIMEOUT_WARNING:
+                    extractor_core.debug_print(
+                        f"WARNING - Slow decompilation: {demangled_name} at 0x{ea:X} took {decompile_duration:.1f}s"
+                    )
+                _profile_add_stage(profile, "decompile", decompile_duration, ea, demangled_name)
         else:
             decompiled_code = "Decompiler not available"
 
@@ -1282,6 +1375,11 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         base_dir = os.path.dirname(input_file_path)
         file_name = os.path.basename(input_file_path)
         _, file_extension = os.path.splitext(file_name)
+
+        # Resolve per-module decompilation blacklist
+        decompile_blacklist = constants.DECOMPILATION_BLACKLIST.get(file_name.lower())
+        if decompile_blacklist:
+            debug_print(f"INFO - Decompilation blacklist active for {file_name}: {len(decompile_blacklist)} pattern(s)")
         
         string_map_start = time.perf_counter()
         string_map = extractor_core.build_string_map() if options['extract_strings'] else {}
@@ -1391,7 +1489,8 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
                 
                 for idx, ea in enumerate(function_addresses):
                     func_total_start = time.perf_counter()
-                    func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id, import_addresses=import_addresses, profile=profile)
+                    debug_print(f"TRACE - [{idx+1}/{len(function_addresses)}] Processing 0x{ea:X}: {extractor_core.get_raw_function_name(ea)}")
+                    func_data = _process_single_function(ea, string_map, has_decompiler, options, addr_to_id, import_addresses=import_addresses, profile=profile, decompile_blacklist=decompile_blacklist)
                     func_total_duration = time.perf_counter() - func_total_start
                     if profile_enabled:
                         func_name = extractor_core.get_raw_function_name(ea)

@@ -627,9 +627,13 @@ function Start-SymbolDownload {
     }
     
     $downloadDuration = (Get-Date) - $downloadStartTime
-    $durationStr = "{0:N1}" -f $downloadDuration.TotalMinutes
+    $durationStr = if ($downloadDuration.TotalMinutes -lt 1) {
+        "{0:N0} seconds" -f $downloadDuration.TotalSeconds
+    } else {
+        "{0:N1} minutes" -f $downloadDuration.TotalMinutes
+    }
     Write-Host ""
-    Write-Host "Symbol download completed in $durationStr minutes. $succeeded succeeded, $failed had no symbols available." -ForegroundColor Cyan
+    Write-Host "Symbol download completed in $durationStr. $succeeded succeeded, $failed had no symbols available." -ForegroundColor Cyan
     if ($failed -gt 0) {
         Write-Host "Note: Missing symbols are normal - not all PE files have public symbols available." -ForegroundColor Yellow
     }
@@ -1026,8 +1030,12 @@ function Update-CompletedProcessInfo {
                     
                     # Log completion notification
                     $fileName = [System.IO.Path]::GetFileName($info.FileName)
-                    $durationStr = if ($info.DurationMinutes) { 
-                        "{0:N1} minutes" -f $info.DurationMinutes 
+                    $durationStr = if ($info.DurationMinutes) {
+                        if ($info.DurationMinutes -lt 1) {
+                            "{0:N0} seconds" -f ($info.DurationMinutes * 60)
+                        } else {
+                            "{0:N1} minutes" -f $info.DurationMinutes
+                        }
                     }
                     else { 
                         "unknown duration" 
@@ -1313,8 +1321,13 @@ function Start-IDAProcesses {
                 foreach ($p in $activeProcesses) {
                     $info = $processInfo[$p.BaseName]
                     if ($info -and $info.StartTime) {
-                        $elapsed = [math]::Round(($currentTime - $info.StartTime).TotalMinutes, 1)
-                        Write-Host "  PID $($p.Id): $([System.IO.Path]::GetFileName($info.FileName)) - running for $elapsed minutes"
+                        $elapsedMinutes = ($currentTime - $info.StartTime).TotalMinutes
+                        $elapsedStr = if ($elapsedMinutes -lt 1) {
+                            "{0:N0} seconds" -f ($elapsedMinutes * 60)
+                        } else {
+                            "{0:N1} minutes" -f $elapsedMinutes
+                        }
+                        Write-Host "  PID $($p.Id): $([System.IO.Path]::GetFileName($info.FileName)) - running for $elapsedStr"
                     }
                 }
             }

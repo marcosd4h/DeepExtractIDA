@@ -56,6 +56,17 @@ DECOMPILATION_TIMEOUT_WARNING = 30.0  # Seconds after which decompilation is con
 DECOMPILATION_TIMEOUT = 600           # Hard timeout (seconds) per function, decompilation is skipped if exceeded
 DECOMPILATION_MIN_OUTPUT_LENGTH = 10  # Minimum length for valid decompiled output
 
+# Per-module decompilation blacklist.
+# Keys are lowercase module filenames (e.g. "appxdeploymentclient.dll").
+# Values are sets of function name substrings -- if any substring matches
+# the demangled function name, decompilation is skipped for that function.
+# Use "*" as the sole entry to skip ALL decompilation for that module.
+DECOMPILATION_BLACKLIST: dict = {
+    "appxdeploymentclient.dll": {
+        "StateRepository::ResourcePriority::AutoThreadPriority<22",
+    },
+}
+
 # Database Performance Configuration
 COMMIT_TIME_SLOW_THRESHOLD = 2.0  # Seconds - reduce batch size if commit takes longer
 BATCH_SIZE_MIN = 25               # Minimum batch size
