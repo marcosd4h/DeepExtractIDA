@@ -249,7 +249,7 @@ def _build_identity(file_info: Optional[sqlite3.Row],
         "description": file_info["file_description"] if "file_description" in keys else None,
         "company": file_info["company_name"] if "company_name" in keys else None,
         "version": (file_info["file_version"] if "file_version" in keys and file_info["file_version"]
-                     else file_info.get("product_version") if "product_version" in keys else None),
+                     else file_info["product_version"] if "product_version" in keys else None),
     }
 
 
