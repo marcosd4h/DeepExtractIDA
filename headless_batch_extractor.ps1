@@ -8,19 +8,22 @@
     and other results into SQLite databases.
 
 .PARAMETER ExtractDir
-    Directory path to scan for PE files (.exe, .dll, .sys). Use with -Recursive for subdirectory scanning.
+    One or more directory paths to scan for PE files (.exe, .dll, .sys) without recursion
+    (top-level only). Accepts a comma-separated list. Can be combined with -ExtractDirRecursive.
+
+.PARAMETER ExtractDirRecursive
+    One or more directory paths to scan recursively for PE files (.exe, .dll, .sys), including
+    all subdirectories. Accepts a comma-separated list. Can be combined with -ExtractDir.
 
 .PARAMETER FilesToAnalyze
     Path to a text file containing a list of PE file paths to analyze (one per line).
 
 .PARAMETER TargetPid
-    Process ID (PID) to extract loaded modules from. Enumerates all modules and analyzes them.
+    One or more Process IDs (PIDs) to extract loaded modules from. Accepts a comma-separated list
+    of PIDs. Modules from all processes are merged into a single batch and deduplicated.
 
 .PARAMETER StorageDir
     Directory where analysis results will be stored (SQLite databases, logs, IDB cache).
-
-.PARAMETER Recursive
-    Include subdirectories when scanning (only valid with -ExtractDir).
 
 .PARAMETER IdaPath
     Path to IDA Pro executable (idat.exe or idat64.exe). If not specified, the script auto-detects the latest IDA 9.x installation.
@@ -44,27 +47,33 @@
     Symbol server URL to download PDBs from (default: https://msdl.microsoft.com/download/symbols).
 
 .EXAMPLE
-    .\headless_batch_extractor.ps1 -ExtractDir "C:\Windows\System32" -StorageDir "C:\Analysis" -Recursive
+    .\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Windows\System32" -StorageDir "C:\Analysis"
+
+.EXAMPLE
+    .\headless_batch_extractor.ps1 -ExtractDir "C:\Windows" -ExtractDirRecursive "C:\Windows\System32","C:\Windows\SystemApps" -StorageDir "C:\Analysis"
 
 .EXAMPLE
     .\headless_batch_extractor.ps1 -FilesToAnalyze "files.txt" -StorageDir "C:\Analysis"
 
 .EXAMPLE
-    .\headless_batch_extractor.ps1 -TargetPid 1234 -StorageDir "C:\Analysis"
+    .\headless_batch_extractor.ps1 -TargetPid 1234,5678 -StorageDir "C:\Analysis"
 
 .EXAMPLE
     .\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -IdaPath "C:\IDA92\idat64.exe"
 
 .EXAMPLE
-    .\headless_batch_extractor.ps1 -ExtractDir "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
+    .\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Directory')]
 param(
-    # Parameter set for directory-based extraction
-    [Parameter(Mandatory = $true, ParameterSetName = 'Directory', HelpMessage = "Directory path to scan for PE files")]
-    [ValidateNotNullOrEmpty()]
-    [string]$ExtractDir,
+    # Directory-based extraction: non-recursive (flat, top-level only)
+    [Parameter(ParameterSetName = 'Directory', HelpMessage = "One or more directory paths to scan for PE files (non-recursive)")]
+    [string[]]$ExtractDir,
+
+    # Directory-based extraction: recursive (includes subdirectories)
+    [Parameter(ParameterSetName = 'Directory', HelpMessage = "One or more directory paths to scan recursively for PE files")]
+    [string[]]$ExtractDirRecursive,
 
     # Parameter set for file-list based extraction
     [Parameter(Mandatory = $true, ParameterSetName = 'FileList', HelpMessage = "Path to text file containing list of PE files to analyze")]
@@ -76,10 +85,10 @@ param(
         })]
     [string]$FilesToAnalyze,
 
-    # Parameter set for PID-based extraction
-    [Parameter(Mandatory = $true, ParameterSetName = 'Pid', HelpMessage = "Process ID to extract loaded modules from")]
-    [ValidateRange(1, [int]::MaxValue)]
-    [int]$TargetPid,
+    # Parameter set for PID-based extraction (accepts one or more PIDs)
+    [Parameter(Mandatory = $true, ParameterSetName = 'Pid', HelpMessage = "One or more Process IDs to extract loaded modules from")]
+    [ValidateNotNullOrEmpty()]
+    [int[]]$TargetPid,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'Directory', HelpMessage = "Directory where analysis results will be stored")]
     [Parameter(Mandatory = $true, ParameterSetName = 'FileList')]
@@ -87,9 +96,6 @@ param(
     [Parameter(ParameterSetName = 'Help')]
     [ValidateNotNullOrEmpty()]
     [string]$StorageDir,
-
-    [Parameter(HelpMessage = "Include subdirectories when scanning for PE files (only valid with -ExtractDir)")]
-    [switch]$Recursive,
 
     [Parameter(HelpMessage = "Path to IDA Pro executable (idat.exe). Auto-detected if not specified.")]
     [ValidateScript({ 
@@ -159,22 +165,23 @@ function Show-Help {
     Write-Host "EXTRACTION MODES:" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  1. Directory Scan Mode" -ForegroundColor Green
-    Write-Host "     Scans a directory for PE files (.exe, .dll, .sys)"
-    Write-Host "     Usage: -ExtractDir <path> [-Recursive]"
+    Write-Host "     Scans one or more directories for PE files (.exe, .dll, .sys)"
+    Write-Host "     -ExtractDir <path>[,...]            Non-recursive (top-level only)"
+    Write-Host "     -ExtractDirRecursive <path>[,...]   Recursive (includes subdirectories)"
+    Write-Host "     Both parameters can be combined in a single invocation."
     Write-Host ""
     Write-Host "  2. File List Mode" -ForegroundColor Green
     Write-Host "     Processes files listed in a text file (one path per line)"
     Write-Host "     Usage: -FilesToAnalyze <file.txt>"
     Write-Host ""
     Write-Host "  3. PID Mode" -ForegroundColor Green
-    Write-Host "     Extracts all modules loaded by a running process"
-    Write-Host "     Usage: -TargetPid <process_id>"
+    Write-Host "     Extracts all modules loaded by one or more running processes"
+    Write-Host "     Usage: -TargetPid <pid>[,<pid2>,...]"
     Write-Host ""
     Write-Host "COMMON PARAMETERS:" -ForegroundColor Yellow
     Write-Host "  -StorageDir <path>      Output directory for analysis results (required)"
     Write-Host "  -IdaPath <path>         Path to IDA Pro executable (auto-detected if not specified)"
     Write-Host "  -MaxConcurrentProcesses Number of parallel IDA processes (default: 4)"
-    Write-Host "  -Recursive              Include subdirectories (Directory mode only)"
     Write-Host "  -Help                   Display this help message"
     Write-Host ""
     Write-Host "ANALYSIS FLAGS (disable specific features):" -ForegroundColor Yellow
@@ -204,20 +211,26 @@ function Show-Help {
     Write-Host ""
     Write-Host "EXAMPLES:" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  # Analyze all PE files in System32 (recursive, symbols auto-downloaded)" -ForegroundColor Gray
-    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Windows\System32' -StorageDir 'C:\Analysis' -Recursive"
+    Write-Host "  # Recursive scan of System32 (symbols auto-downloaded)" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Windows\System32' -StorageDir 'C:\Analysis'"
+    Write-Host ""
+    Write-Host "  # Non-recursive scan (top-level PE files only)" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Windows' -StorageDir 'C:\Analysis'"
+    Write-Host ""
+    Write-Host "  # Mix recursive and non-recursive directories" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Windows' -ExtractDirRecursive 'C:\Windows\System32' -StorageDir 'C:\Analysis'"
     Write-Host ""
     Write-Host "  # Analyze files from a list" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -FilesToAnalyze 'targets.txt' -StorageDir 'C:\Analysis'"
     Write-Host ""
-    Write-Host "  # Extract modules from a running process (PID 1234)" -ForegroundColor Gray
-    Write-Host "  .\headless_batch_extractor.ps1 -TargetPid 1234 -StorageDir 'C:\Analysis'"
+    Write-Host "  # Extract modules from multiple processes" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -TargetPid 1234,5678 -StorageDir 'C:\Analysis'"
     Write-Host ""
     Write-Host "  # Skip symbol downloading (faster startup, less accurate analysis)" -ForegroundColor Gray
-    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -NoDownloadSymbols"
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Binaries' -StorageDir 'C:\Analysis' -NoDownloadSymbols"
     Write-Host ""
     Write-Host "  # Use a custom symbol store path" -ForegroundColor Gray
-    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -SymbolStorePath 'D:\MySymbols'"
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Binaries' -StorageDir 'C:\Analysis' -SymbolStorePath 'D:\MySymbols'"
     Write-Host ""
     Write-Host "  # Skip string extraction to reduce analysis time" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -NoExtractStrings"
@@ -225,8 +238,17 @@ function Show-Help {
     Write-Host "  # Use a specific IDA installation" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -IdaPath 'C:\IDA92\idat64.exe'"
     Write-Host ""
-    Write-Host "  # Run with 8 concurrent IDA processes (high-core systems)" -ForegroundColor Gray
-    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Large\Dataset' -StorageDir 'C:\Analysis' -MaxConcurrentProcesses 8"
+    Write-Host "  # Extract the full Windows usermode codebase (recursive + non-recursive)" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 ``"
+    Write-Host "      -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' ``"
+    Write-Host "      -ExtractDir 'C:\Windows' ``"
+    Write-Host "      -StorageDir 'F:\Analysis\win11_full' -MaxConcurrentProcesses 8"
+    Write-Host ""
+    Write-Host "  # Extended: add SysWOW64 (32-bit) and kernel drivers" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 ``"
+    Write-Host "      -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SysWOW64','C:\Windows\System32\drivers','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' ``"
+    Write-Host "      -ExtractDir 'C:\Windows' ``"
+    Write-Host "      -StorageDir 'F:\Analysis\win11_full_extended' -MaxConcurrentProcesses 8"
     Write-Host ""
     Write-Host "OUTPUT STRUCTURE:" -ForegroundColor Yellow
     Write-Host "  <storageDir>/"
@@ -274,15 +296,17 @@ $script:PROCESS_CLEANUP_WAIT_MS = 3000   # Wait time during cleanup termination
 $script:STATUS_UPDATE_INTERVAL_SECONDS = 300  # How often to print status updates (5 minutes)
 $script:PROCESS_POLL_INTERVAL_SECONDS = 5    # Polling interval in final wait loop
 
-# Add parameter validation at the start of the script
-if ($PSCmdlet.ParameterSetName -eq 'FileList' -and $Recursive) {
-    Write-Error "The -Recursive parameter cannot be used with -FilesToAnalyze. The -Recursive parameter is only valid when scanning directories with -ExtractDir."
-    Write-Host ""
-    Write-Host "Usage examples:"
-    Write-Host "  Directory scan: .\headless_batch_extractor.ps1 -ExtractDir 'C:\path\to\scan' -Recursive -StorageDir 'C:\tools\db'"
-    Write-Host "  File list:      .\headless_batch_extractor.ps1 -FilesToAnalyze 'input.txt' -StorageDir 'C:\tools\db'"
-    Write-Host "  Skip C++ gen:   .\headless_batch_extractor.ps1 -ExtractDir 'C:\path\to\scan' -StorageDir 'C:\tools\db' -NoGenerateCpp"
-    exit $script:EXIT_VALIDATION_ERROR
+# Validate that at least one directory source is provided in Directory mode
+if ($PSCmdlet.ParameterSetName -eq 'Directory') {
+    if (-not $ExtractDir -and -not $ExtractDirRecursive) {
+        Write-Error "At least one of -ExtractDir or -ExtractDirRecursive must be specified."
+        Write-Host ""
+        Write-Host "Usage examples:"
+        Write-Host "  Non-recursive:  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Windows' -StorageDir 'C:\Analysis'"
+        Write-Host "  Recursive:      .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Windows\System32' -StorageDir 'C:\Analysis'"
+        Write-Host "  Mixed:          .\headless_batch_extractor.ps1 -ExtractDir 'C:\Windows' -ExtractDirRecursive 'C:\Windows\System32' -StorageDir 'C:\Analysis'"
+        exit $script:EXIT_VALIDATION_ERROR
+    }
 }
 
 # Auto-detect IDA Pro installation
@@ -629,7 +653,8 @@ function Start-SymbolDownload {
     $downloadDuration = (Get-Date) - $downloadStartTime
     $durationStr = if ($downloadDuration.TotalMinutes -lt 1) {
         "{0:N0} seconds" -f $downloadDuration.TotalSeconds
-    } else {
+    }
+    else {
         "{0:N1} minutes" -f $downloadDuration.TotalMinutes
     }
     Write-Host ""
@@ -1033,7 +1058,8 @@ function Update-CompletedProcessInfo {
                     $durationStr = if ($info.DurationMinutes) {
                         if ($info.DurationMinutes -lt 1) {
                             "{0:N0} seconds" -f ($info.DurationMinutes * 60)
-                        } else {
+                        }
+                        else {
                             "{0:N1} minutes" -f $info.DurationMinutes
                         }
                     }
@@ -1324,7 +1350,8 @@ function Start-IDAProcesses {
                         $elapsedMinutes = ($currentTime - $info.StartTime).TotalMinutes
                         $elapsedStr = if ($elapsedMinutes -lt 1) {
                             "{0:N0} seconds" -f ($elapsedMinutes * 60)
-                        } else {
+                        }
+                        else {
                             "{0:N1} minutes" -f $elapsedMinutes
                         }
                         Write-Host "  PID $($p.Id): $([System.IO.Path]::GetFileName($info.FileName)) - running for $elapsedStr"
@@ -1455,8 +1482,10 @@ function Write-ExtractionReport {
         [Parameter(Mandatory = $true)][string]$StorageDir,
         [Parameter(Mandatory = $true)][hashtable]$results,
         [Parameter(Mandatory = $false)][string]$mode,
-        [Parameter(Mandatory = $false)][int]$targetPid,
-        [Parameter(Mandatory = $false)][string]$processName
+        [Parameter(Mandatory = $false)][int[]]$targetPids,
+        [Parameter(Mandatory = $false)][string[]]$processNames,
+        [Parameter(Mandatory = $false)][string[]]$extractDirs,
+        [Parameter(Mandatory = $false)][string[]]$extractDirsRecursive
     )
     
     $timestamp = Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'
@@ -1488,10 +1517,18 @@ function Write-ExtractionReport {
         empty_log_files        = $results.EmptyLogFiles
     }
     
-    # Add PID-specific info if applicable
-    if ($mode -eq 'Pid' -and $targetPid) {
-        $report.extraction_info.target_pid = $targetPid
-        $report.extraction_info.process_name = $processName
+    if ($mode -eq 'Pid' -and $targetPids) {
+        $report.extraction_info.target_pids = $targetPids
+        $report.extraction_info.process_names = $processNames
+    }
+    
+    if ($mode -eq 'Directory') {
+        if ($extractDirs) {
+            $report.extraction_info.extract_dirs = $extractDirs
+        }
+        if ($extractDirsRecursive) {
+            $report.extraction_info.extract_dirs_recursive = $extractDirsRecursive
+        }
     }
     
     $reportPath = Join-Path $StorageDir "extraction_report.json"
@@ -1818,6 +1855,12 @@ function Write-TimingSummary {
 # Check admin privileges (only required for PID mode)
 if ($PSCmdlet.ParameterSetName -eq 'Pid') {
     Test-AdminPrivileges
+    foreach ($targetPidValue in $TargetPid) {
+        if ($targetPidValue -lt 1) {
+            Write-Error "Invalid PID value: $targetPidValue. All PIDs must be positive integers."
+            exit $script:EXIT_VALIDATION_ERROR
+        }
+    }
 }
 
 # Pre-flight check: Verify Python is installed and accessible
@@ -1881,9 +1924,12 @@ else {
 }
 
 # Ensure required directories exist
-# Pass ExtractDir for validation if in Directory mode
+# Validate each ExtractDir and ExtractDirRecursive entry, then set up StorageDir
 if ($PSCmdlet.ParameterSetName -eq 'Directory') {
-    Confirm-RequiredPaths -ExtractDir $ExtractDir -StorageDir $StorageDir
+    foreach ($dir in @($ExtractDir) + @($ExtractDirRecursive)) {
+        if ($dir) { Confirm-DirectoryExists -path $dir -create $false }
+    }
+    Confirm-RequiredPaths -StorageDir $StorageDir
 }
 else {
     Confirm-RequiredPaths -StorageDir $StorageDir
@@ -1910,24 +1956,39 @@ $analysisFlags = @{
 
 # Determine which files to analyze based on the parameter set used
 $candidateFiles = @()
-$pidModeInfo = $null  # Store process info for PID mode reporting
+$pidModeInfoList = @()  # Store process info list for PID mode reporting
 
 if ($PSCmdlet.ParameterSetName -eq 'Directory') {
-    # ExtractDir already validated in Confirm-RequiredPaths above
-    if ($Recursive) {
-        $candidateFiles = Get-CandidateFilesFromDirectory -ExtractDir $ExtractDir -Recursive
+    foreach ($dir in @($ExtractDir)) {
+        if (-not $dir) { continue }
+        $found = Get-CandidateFilesFromDirectory -ExtractDir $dir
+        if ($found) { $candidateFiles += $found }
     }
-    else {
-        $candidateFiles = Get-CandidateFilesFromDirectory -ExtractDir $ExtractDir
+    foreach ($dir in @($ExtractDirRecursive)) {
+        if (-not $dir) { continue }
+        $found = Get-CandidateFilesFromDirectory -ExtractDir $dir -Recursive
+        if ($found) { $candidateFiles += $found }
     }
 }
 elseif ($PSCmdlet.ParameterSetName -eq 'FileList') {
     $candidateFiles = Get-CandidateFilesFromFileList -filePath $FilesToAnalyze
 }
 elseif ($PSCmdlet.ParameterSetName -eq 'Pid') {
-    # Get-CandidateFilesFromPid returns a structured hashtable with Files, ProcessName, ProcessId
-    $pidModeInfo = Get-CandidateFilesFromPid -ProcessId $TargetPid -StorageDir $StorageDir
-    $candidateFiles = $pidModeInfo.Files
+    foreach ($targetPidValue in $TargetPid) {
+        $info = Get-CandidateFilesFromPid -ProcessId $targetPidValue -StorageDir $StorageDir
+        if ($info.Files) { $candidateFiles += $info.Files }
+        $pidModeInfoList += $info
+    }
+}
+
+# Deduplicate candidate files by full path (same file may appear from multiple dirs or PIDs)
+if ($candidateFiles.Count -gt 0) {
+    $beforeCount = $candidateFiles.Count
+    $candidateFiles = @($candidateFiles | Sort-Object -Property FullName -Unique)
+    $dedupRemoved = $beforeCount - $candidateFiles.Count
+    if ($dedupRemoved -gt 0) {
+        Write-Host "Deduplicated $dedupRemoved duplicate file(s) across sources. $($candidateFiles.Count) unique candidates remain."
+    }
 }
 
 # Filter out files that have already been analyzed
@@ -1962,9 +2023,14 @@ if ($files.Count -gt 0) {
             mode       = $PSCmdlet.ParameterSetName
         }
         
-        if ($PSCmdlet.ParameterSetName -eq 'Pid' -and $null -ne $pidModeInfo) {
-            $reportParams.targetPid = $pidModeInfo.ProcessId
-            $reportParams.processName = $pidModeInfo.ProcessName
+        if ($PSCmdlet.ParameterSetName -eq 'Pid' -and $pidModeInfoList.Count -gt 0) {
+            $reportParams.targetPids = @($pidModeInfoList | ForEach-Object { $_.ProcessId })
+            $reportParams.processNames = @($pidModeInfoList | ForEach-Object { $_.ProcessName })
+        }
+        
+        if ($PSCmdlet.ParameterSetName -eq 'Directory') {
+            if ($ExtractDir) { $reportParams.extractDirs = $ExtractDir }
+            if ($ExtractDirRecursive) { $reportParams.extractDirsRecursive = $ExtractDirRecursive }
         }
         
         $reportPath = Write-ExtractionReport @reportParams

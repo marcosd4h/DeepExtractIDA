@@ -38,8 +38,10 @@ When using `headless_batch_extractor.ps1`, the script orchestrates multiple IDA 
     "mode": "Directory | FileList | Pid",
     "storage_directory": "path",
     "timeout_hours": number,
-    "target_pid": number,
-    "process_name": "string"
+    "extract_dirs": ["path", ...],
+    "extract_dirs_recursive": ["path", ...],
+    "target_pids": [number, ...],
+    "process_names": ["string", ...]
   },
   "summary": {
     "total_files": number,
@@ -69,7 +71,8 @@ When using `headless_batch_extractor.ps1`, the script orchestrates multiple IDA 
 
 Notes:
 
-- `target_pid` and `process_name` are included only when `mode` is `Pid`.
+- `target_pids` and `process_names` are arrays included only when `mode` is `Pid`.
+- `extract_dirs` (non-recursive) and `extract_dirs_recursive` are arrays included only when `mode` is `Directory`. Either or both may be present depending on which parameters were used.
 - Per-file base name (`{base_name}`) is computed as: `{file.Name.Replace('.', '_')}_{md5_prefix}` lower-cased, where `md5_prefix` is the first 10 characters of the MD5 of the file contents. Example: `kernel32.dll` -> `kernel32_dll_a1b2c3d4e5`.
 
 ---

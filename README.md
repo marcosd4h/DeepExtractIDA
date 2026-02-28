@@ -118,9 +118,9 @@ For large-scale analysis, clone the repository and use the `headless_batch_extra
 #### Features
 
 - **Three Extraction Modes:**
-  - **Directory Scan**: Recursively scan directories for PE files
+  - **Directory Scan**: Scan one or more directories for PE files, with independent control over recursive (`-ExtractDirRecursive`) and non-recursive (`-ExtractDir`) scanning -- both can be combined
   - **File List**: Process files from a text list (one path per line)
-  - **PID Mode**: Extract all modules loaded by a running process
+  - **PID Mode**: Extract all modules loaded by one or more running processes
 - **Automatic Symbol Downloading**: Pre-downloads PDB symbols from Microsoft's symbol server using `symchk.exe` before IDA analysis (enabled by default, requires Windows SDK Debugging Tools)
 - **IDA Auto-Detection**: Automatically identifies the IDA installation (9.x series)
 - **Concurrent Processing**: Spawns multiple IDA processes (default: 4) for parallel analysis
@@ -145,10 +145,29 @@ The latest version is selected automatically. Override with `-IdaPath` parameter
 **Directory Scan Mode (Recursive)**
 
 ```powershell
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Windows\System32" -StorageDir "C:\Analysis" -Recursive
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Windows\System32" -StorageDir "C:\Analysis"
 ```
 
-Scans all PE files in System32 and subdirectories.
+Recursively scans all PE files in System32 and subdirectories.
+
+**Non-Recursive Scan (Top-Level Only)**
+
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDir "C:\Windows" -StorageDir "C:\Analysis"
+```
+
+Scans only the top-level PE files in the directory, without descending into subdirectories.
+
+**Mixed Recursive and Non-Recursive**
+
+```powershell
+.\headless_batch_extractor.ps1 `
+    -ExtractDirRecursive "C:\Windows\System32","C:\Windows\SystemApps" `
+    -ExtractDir "C:\Windows" `
+    -StorageDir "C:\Analysis"
+```
+
+Recursively scans `System32` and `SystemApps`, while scanning only top-level files in `C:\Windows`. Files from all sources are merged into one batch and deduplicated.
 
 **File List Mode**
 
@@ -170,11 +189,15 @@ C:\Program Files\MyApp\app.exe
 .\headless_batch_extractor.ps1 -TargetPid 1234 -StorageDir "C:\Analysis"
 ```
 
-Extracts all modules loaded by process ID 1234. Creates a dedicated subfolder with naming format:
+Extracts all modules loaded by process ID 1234.
 
+**Multiple PIDs**
+
+```powershell
+.\headless_batch_extractor.ps1 -TargetPid 1234,5678 -StorageDir "C:\Analysis"
 ```
-C:\Analysis\pid_1234_processname_20260115_143022\
-```
+
+Extracts modules from multiple processes. Modules are merged into one batch and deduplicated.
 
 **Custom IDA Path**
 
@@ -193,14 +216,14 @@ C:\Analysis\pid_1234_processname_20260115_143022\
 
 ```powershell
 # Run 8 concurrent IDA processes (for high-core systems)
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
 ```
 
 **Skip Symbol Downloading**
 
 ```powershell
 # Disable automatic PDB downloading for faster startup
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -NoDownloadSymbols
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Binaries" -StorageDir "C:\Analysis" -NoDownloadSymbols
 ```
 
 **Custom Symbol Store Path**
@@ -296,9 +319,8 @@ Get-Help .\headless_batch_extractor.ps1 -Examples
 ```powershell
 # Phase 1: Initial scan of system binaries (skip C++ for speed)
 .\headless_batch_extractor.ps1 `
-    -ExtractDir "C:\Windows\System32" `
+    -ExtractDirRecursive "C:\Windows\System32" `
     -StorageDir "C:\Analysis\SystemBinaries" `
-    -Recursive `
     -NoGenerateCpp `
     -MaxConcurrentProcesses 8
 
@@ -308,11 +330,71 @@ Get-Help .\headless_batch_extractor.ps1 -Examples
     -StorageDir "C:\Analysis\MalwareSamples" `
     -MaxConcurrentProcesses 4
 
-# Phase 3: Runtime module extraction from suspicious process
+# Phase 3: Runtime module extraction from suspicious processes
 .\headless_batch_extractor.ps1 `
-    -TargetPid 5678 `
+    -TargetPid 5678,9012 `
     -StorageDir "C:\Analysis\RuntimeExtraction"
 ```
+
+#### Full Windows Codebase Extraction
+
+By targeting the key OS directories together, you can extract and decompile virtually the entire Windows usermode codebase into structured, AI-queryable C++ and SQLite databases in a single batch run. Use `-ExtractDirRecursive` for directories with rich subdirectory trees and `-ExtractDir` for top-level-only locations:
+
+```powershell
+.\headless_batch_extractor.ps1 `
+    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
+    -ExtractDir 'C:\Windows' `
+    -StorageDir "F:\Analysis\win11_full" `
+    -MaxConcurrentProcesses 8
+```
+
+This covers core OS libraries (`System32`), modern UWP/packaged apps (`SystemApps`, `ImmersiveControlPanel`), shared frameworks (`Common Files`), and input method components (`IME`) recursively, plus top-level PE files directly under `C:\Windows` (e.g. `explorer.exe`, `regedit.exe`, `notepad.exe`).
+
+**Extended -- add SysWOW64 (32-bit) and kernel drivers:**
+
+```powershell
+.\headless_batch_extractor.ps1 `
+    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SysWOW64','C:\Windows\System32\drivers','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
+    -ExtractDir 'C:\Windows' `
+    -StorageDir "F:\Analysis\win11_full_extended" `
+    -MaxConcurrentProcesses 8
+```
+
+Adds 32-bit system libraries (`SysWOW64`) and kernel-mode drivers (`.sys` files under `drivers`).
+
+**Maximum coverage -- include all installed applications:**
+
+```powershell
+.\headless_batch_extractor.ps1 `
+    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SysWOW64','C:\Windows\System32\drivers','C:\Windows\SystemApps','C:\Program Files','C:\Program Files (x86)','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
+    -ExtractDir 'C:\Windows' `
+    -StorageDir "F:\Analysis\win11_everything" `
+    -MaxConcurrentProcesses 8
+```
+
+Covers the entire OS plus all installed third-party applications.
+
+**Speed-optimized -- two-pass extraction:**
+
+```powershell
+# Pass 1: fast DB-only extraction (skip C++ generation)
+.\headless_batch_extractor.ps1 `
+    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
+    -ExtractDir 'C:\Windows' `
+    -StorageDir "F:\Analysis\win11_full" `
+    -NoGenerateCpp `
+    -MaxConcurrentProcesses 8
+
+# Pass 2: re-run with C++ generation on the same StorageDir
+.\headless_batch_extractor.ps1 `
+    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
+    -ExtractDir 'C:\Windows' `
+    -StorageDir "F:\Analysis\win11_full" `
+    -ForceReanalyze `
+    -MaxConcurrentProcesses 8
+```
+
+The first pass builds SQLite databases quickly without C++ overhead. The second pass re-analyzes with full C++ code generation. Useful when you want queryable databases available as soon as possible.
 
 ### Headless Mode (Individual File Extraction)
 
