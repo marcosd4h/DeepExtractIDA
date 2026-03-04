@@ -1580,19 +1580,17 @@ if not exist .agent git clone https://github.com/marcosd4h/DeepExtractRuntime .a
 [ ! -d .agent ] && git clone https://github.com/marcosd4h/DeepExtractRuntime .agent
 ```
 
-### Step 2 -- Create `.claude` and `.cursor` symlinks
+### Step 2 -- Create `.claude` symlink
 
-Claude Code discovers skills, agents, and hooks from `.claude/`. Cursor
-discovers rules and skills from `.cursor/`. Directory symlinks pointing both
-to `.agent` make the runtime visible to either tool without duplicating files.
+Claude Code discovers skills, agents, and hooks from `.claude/`. A directory
+symlink pointing to `.agent` makes the runtime visible without duplicating files.
 
-Check whether each symlink exists. If it does NOT, create it:
+Check whether the symlink exists. If it does NOT, create it:
 
 **Windows (cmd -- requires Developer Mode or elevated prompt):**
 
 ```cmd
 if not exist .claude mklink /D .claude .agent
-if not exist .cursor mklink /D .cursor .agent
 ```
 
 **Windows (bash / Git Bash -- requires Developer Mode or elevated prompt):**
@@ -1603,14 +1601,12 @@ if not exist .cursor mklink /D .cursor .agent
 
 ```bash
 cmd //c "mklink /D .claude .agent"
-cmd //c "mklink /D .cursor .agent"
 ```
 
 **bash (macOS / Linux):**
 
 ```bash
 [ ! -L .claude ] && ln -s .agent .claude
-[ ! -L .cursor ] && ln -s .agent .cursor
 ```
 
 ### Step 3 -- Verify
@@ -1619,7 +1615,6 @@ ALL of the following MUST be true before you proceed:
 
 - `.agent/AGENTS.md` exists and is readable.
 - `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
-- `.cursor` is a symlink (or junction on Windows) pointing to `.agent`.
 - `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, and `.agent/helpers/` directories exist.
 
 If any check fails, remove the partial installation and re-run from Step 1:

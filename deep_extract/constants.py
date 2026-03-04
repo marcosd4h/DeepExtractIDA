@@ -65,6 +65,9 @@ DECOMPILATION_BLACKLIST: dict = {
     "appxdeploymentclient.dll": {
         "StateRepository::ResourcePriority::AutoThreadPriority<22",
     },
+    "windows.globalization.dll": {
+        "EastAsianLunisolarCalendar::CurrentMajorSolarTerm",
+    },
 }
 
 # Database Performance Configuration
