@@ -1627,6 +1627,48 @@ rm -rf .agent .claude
 
 ---
 
+## Runtime Update
+
+When the user says **"update deepextract runtime"** (case-insensitive,
+any reasonable variation), or when you need to pull the latest runtime,
+run the steps below. Do NOT ask for confirmation -- just do it.
+
+### Step 1 -- Pull latest changes
+
+Navigate into `.agent/` and pull. If local changes conflict, stash first.
+
+```bash
+cd .agent && git pull
+```
+
+If the pull fails due to local modifications:
+
+```bash
+cd .agent && git stash && git pull && git stash pop
+```
+
+If the stash pop produces conflicts, inform the user and show which files
+conflict so they can resolve manually.
+
+### Step 2 -- Verify
+
+Re-run the same verification from the bootstrap section:
+
+- `.agent/AGENTS.md` exists and is readable.
+- `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
+- `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, and `.agent/helpers/` directories exist.
+
+### Step 3 -- Report
+
+After a successful update, report:
+
+- Previous and new commit hashes (e.g. `ac05b16` -> `8d2bda3`).
+- Summary of what changed (new/updated skills, agents, helpers, commands).
+- Whether local changes were stashed and re-applied cleanly.
+- Verification result (pass / fail with details).
+
+---
+
 ## Master Instructions
 
 Now that the runtime is installed, **read and follow `.agent/AGENTS.md`** as
@@ -1675,21 +1717,54 @@ extraction_report.json   Batch extraction provenance and status
 All extraction databases are **read-only**. Never write to them.
 '@
 
+    $claudeContent = @'
+This file is intentionally minimal.
+
+**Authoritative project instructions live in `AGENTS.md`.**
+
+You must:
+
+1. Open and follow `AGENTS.md` before doing any work.
+2. Treat `AGENTS.md` as the single source of truth for all operations.
+3. Update `AGENTS.md` (not this file) when guidelines/architecture/standards change.
+
+Read now: [AGENTS.md](./AGENTS.md)
+
+---
+
+## Install DeepExtract Runtime
+
+When the user says **"install deepextract runtime"** (case-insensitive,
+any reasonable variation), you MUST immediately execute the full bootstrap
+procedure described in [AGENTS.md -- Runtime Bootstrap](./AGENTS.md#runtime-bootstrap-required).
+Do NOT ask for confirmation -- just run all three steps (clone, symlink,
+verify) in sequence, adapting commands to the detected OS and shell.
+
+After successful installation, report:
+
+- Whether `.agent/` was freshly cloned or already existed.
+- Whether `.claude` symlink was created or already existed.
+- Verification result (pass / fail with details).
+
+---
+
+## Update DeepExtract Runtime
+
+When the user says **"update deepextract runtime"** (case-insensitive,
+any reasonable variation), you MUST immediately execute the update
+procedure described in [AGENTS.md -- Runtime Update](./AGENTS.md#runtime-update).
+Do NOT ask for confirmation -- just run all steps (pull, verify, report)
+in sequence, adapting commands to the detected OS and shell.
+'@
+
     $agentsPath = Join-Path $StorageDir "AGENTS.md"
     $claudePath = Join-Path $StorageDir "CLAUDE.md"
 
     $agentsContent | Out-File -FilePath $agentsPath -Encoding UTF8
     Write-Host "AGENTS.md created at: $agentsPath"
 
-    try {
-        if (Test-Path $claudePath) { Remove-Item $claudePath -Force }
-        New-Item -ItemType SymbolicLink -Path $claudePath -Target $agentsPath | Out-Null
-        Write-Host "CLAUDE.md symlink created at: $claudePath"
-    }
-    catch {
-        Copy-Item -Path $agentsPath -Destination $claudePath -Force
-        Write-Host "WARNING: Could not create symlink for CLAUDE.md (requires Developer Mode or elevated prompt). Copied file instead." -ForegroundColor Yellow
-    }
+    $claudeContent | Out-File -FilePath $claudePath -Encoding UTF8
+    Write-Host "CLAUDE.md created at: $claudePath"
 }
 
 # Function to format duration in human-readable format
