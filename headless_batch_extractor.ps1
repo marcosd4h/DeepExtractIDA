@@ -1609,18 +1609,50 @@ cmd //c "mklink /D .claude .agent"
 [ ! -L .claude ] && ln -s .agent .claude
 ```
 
-### Step 3 -- Verify
+### Step 3 -- Install Cursor integration
+
+Cursor discovers project hooks from `.cursor/hooks.json` and project rules
+from `.cursor/rules/`. Create the `.cursor` directory, copy the hooks
+configuration, and symlink the rules directory.
+
+**Windows (cmd -- requires Developer Mode or elevated prompt):**
+
+```cmd
+if not exist .cursor mkdir .cursor
+copy /Y .agent\hooks.json .cursor\hooks.json
+if not exist .cursor\rules mklink /D .cursor\rules ..\.agent\rules
+```
+
+**Windows (bash / Git Bash -- requires Developer Mode or elevated prompt):**
+
+```bash
+mkdir -p .cursor
+cp .agent/hooks.json .cursor/hooks.json
+[ ! -L .cursor/rules ] && cmd //c "mklink /D .cursor\rules ..\.agent\rules"
+```
+
+**bash (macOS / Linux):**
+
+```bash
+mkdir -p .cursor
+cp .agent/hooks.json .cursor/hooks.json
+[ ! -L .cursor/rules ] && ln -s ../.agent/rules .cursor/rules
+```
+
+### Step 4 -- Verify
 
 ALL of the following MUST be true before you proceed:
 
 - `.agent/AGENTS.md` exists and is readable.
 - `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
 - `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, `.agent/helpers/`, `.agent/hooks/`, and `.agent/config/` directories exist.
+- `.cursor/hooks.json` exists and is readable.
+- `.cursor/rules` is a symlink (or junction on Windows) pointing to `.agent/rules`.
 
 If any check fails, remove the partial installation and re-run from Step 1:
 
 ```bash
-rm -rf .agent .claude
+rm -rf .agent .claude .cursor
 ```
 
 **Do NOT continue past this point until verification succeeds.**
@@ -1650,6 +1682,13 @@ cd .agent && git stash && git pull && git stash pop
 If the stash pop produces conflicts, inform the user and show which files
 conflict so they can resolve manually.
 
+After a successful pull, re-copy hooks for Cursor (the rules symlink stays
+in sync automatically):
+
+```bash
+cp .agent/hooks.json .cursor/hooks.json
+```
+
 ### Step 2 -- Verify
 
 Re-run the same verification from the bootstrap section:
@@ -1657,6 +1696,8 @@ Re-run the same verification from the bootstrap section:
 - `.agent/AGENTS.md` exists and is readable.
 - `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
 - `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, `.agent/helpers/`, `.agent/hooks/`, and `.agent/config/` directories exist.
+- `.cursor/hooks.json` exists and is readable.
+- `.cursor/rules` is a symlink (or junction on Windows) pointing to `.agent/rules`.
 
 ### Step 3 -- Report
 
