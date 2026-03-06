@@ -22,14 +22,14 @@ Output directory resolution:
 
 ### C++ File Naming
 
-When C++ generation is enabled, function files are named using the sanitized module/class/method names:
+When C++ generation is enabled, functions are grouped into combined files of about **250--300 lines** each to reduce file count:
 
-- **Class methods**: `{module_name}_{class}_{method}.cpp`
-- **Standalone functions**: `{module_name}_standalone_{function}.cpp`
+- **Class methods:** Grouped by class into `{module_name}_{class}_group_1.cpp`, `{module_name}_{class}_group_2.cpp`, etc. Methods are packed in alphabetical order.
+- **Standalone functions:** Grouped into `{module_name}_standalone_group_1.cpp`, `{module_name}_standalone_group_2.cpp`, etc. Functions are packed in alphabetical order.
 
-Sanitization replaces `::` with `_`, removes invalid filename characters, and truncates components to 100 characters. The generator also caps total filename length to avoid OS path limits, appending a hash if needed. If a name collision occurs, a numeric suffix (e.g., `_2`) is appended.
+Class and function names are sanitized: `::` is replaced with `_`, invalid filename characters are removed, and components are truncated to 100 characters. The generator also caps total filename length to avoid OS path limits, appending a hash if needed. If a name collision occurs, a numeric suffix (e.g., `_2`) is appended.
 
-Each `.cpp` file starts with comment headers. The `Function Signature (Extended)` line is included only when the extended signature is present and different from the base signature.
+Each function in a grouped file is preceded by a comment block with its name, mangled name, signature, and optional library tag. The `Function Signature (Extended)` line is included only when the extended signature is present and different from the base signature.
 
 ---
 

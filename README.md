@@ -37,6 +37,7 @@ This use case demonstrates the **headless extractor** feature by generating the 
 - **Grounding Architecture**: LLMs (e.g., Claude Code, Cursor) utilize the generated `.cpp` files and `file_info.md` index to evaluate implementation logic.
 - **Workflow**: A researcher uses Cursor to audit specific functions, such as `ShellExecuteW`. The AI leverages the local context to explain parameters, detect call patterns, and identify logical invariants.
 - **Reporting**: Automated generation of technical reports based on the source-level representation of decompiled logic.
+- **Runtime Integration**: For structured, repeatable analysis workflows on top of this extracted output, see the [AI Analysis Runtime](#ai-analysis-runtime) section below.
 
 ### Interactive Analysis & Structured Data Export
 
@@ -60,6 +61,24 @@ This configuration implements an autonomous auditor using the [Claude Agent SDK]
 - **Skill-Based Extraction**: The agent utilizes "Skills" to interface with the SQLite backend, retrieving decompiled code and cross-reference data on-demand.
 - **Primitive Discovery**: Automated scanning for vulnerability sinks (e.g., insecure API usage) grounded by the structured data layer.
 - **Fail-Safe Monitoring**: Evaluation of complex logical paths where standard automated heuristics may require agentic verification.
+
+## AI Analysis Runtime
+
+The extraction output produced by DeepExtract is designed to be operationalized through [**DeepExtractRuntime**](https://github.com/marcosd4h/DeepExtractRuntime) -- a companion AI-driven analysis runtime that turns raw decompiled code and SQLite databases into structured, queryable binary intelligence. The runtime deploys as an `.agent/` directory alongside the extraction data and operates natively across **Claude Code**, **Cursor**, **Codex CLI**, **Gemini**, and any AI coding harness that supports `AGENTS.md` or equivalent agent configuration conventions.
+
+**Architecture:** Commands &rarr; Agents &rarr; Skills &rarr; Helpers &rarr; Data (extraction DBs + JSON)
+
+The runtime provides:
+
+- **Slash commands** for interactive analysis workflows: `/triage`, `/audit`, `/explain`, `/lift-class`, `/trace-export`, `/data-flow`, `/taint`, `/hunt`, `/state-machines`, `/full-report`, and others.
+- **Specialized agents** (code-lifter, re-analyst, triage-coordinator, type-reconstructor, verifier) that orchestrate multi-step analysis pipelines in isolated contexts.
+- **20+ analysis skills** spanning function classification, call graph tracing, taint analysis, COM/WRL interface reconstruction, attack surface mapping, security dossier generation, type reconstruction, and decompiler verification.
+- **30+ shared helper modules** providing database access, function resolution, API taxonomy (17 functional + 11 security categories), assembly metrics, struct scanning, caching, and cross-module graph analysis.
+- **Lifecycle hooks** that automatically inject module context at session start and support batch processing through grind loops.
+
+This enables researchers to move from raw extraction output to structured security assessments, function-level audits, and full module reports through conversational AI workflows -- without writing custom scripts or queries.
+
+See the [DeepExtractRuntime README](https://github.com/marcosd4h/DeepExtractRuntime) and its [Onboarding Guide](https://github.com/marcosd4h/DeepExtractRuntime/blob/main/docs/ONBOARDING.md) for setup and usage.
 
 ## Extraction Capabilities
 
@@ -245,12 +264,12 @@ The script automatically downloads PDB debug symbols from Microsoft's public sym
 
 **Requirements:** `symchk.exe` from the [Windows SDK Debugging Tools](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/). The script auto-detects it from standard Windows SDK installation paths, or you can specify it manually with `-SymchkPath`.
 
-| Flag                | Description                                            |
-| ------------------- | ------------------------------------------------------ |
+| Flag                 | Description                                           |
+| -------------------- | ----------------------------------------------------- |
 | `-NoDownloadSymbols` | Skip automatic PDB downloading (enabled by default)   |
 | `-SymbolStorePath`   | Local symbol cache directory (default: `C:\symbols`)  |
 | `-SymchkPath`        | Path to `symchk.exe` (auto-detected from Windows SDK) |
-| `-SymbolServerUrl`   | Symbol server URL (default: Microsoft public server)   |
+| `-SymbolServerUrl`   | Symbol server URL (default: Microsoft public server)  |
 
 #### Analysis Flags
 
@@ -272,6 +291,8 @@ The script automatically downloads PDB debug symbols from Microsoft's public sym
 
 ```
 <StorageDir>/
+├─ AGENTS.md                      # AI agent runtime bootstrap (Cursor/Claude Code)
+├─ CLAUDE.md                      # AI agent runtime bootstrap (Claude Code)
 ├─ analyzed_modules_list.txt      # List of files analyzed (all modes)
 ├─ extraction_report.json         # Summary report with success/failure stats
 ├─ analyzed_files.db              # Master tracking database
@@ -285,8 +306,10 @@ The script automatically downloads PDB debug symbols from Microsoft's public sym
 │     ├─ file_info.json           # Structured analysis metadata
 │     └─ file_info.md             # Human-readable analysis report
 ├─ logs/
-│  ├─ <filename>_<timestamp>.log  # IDA analysis logs
-│  └─ symchk_<filename>_*.log    # Symbol download logs (if enabled)
+│  ├─ batch_extractor_<timestamp>.log       # PowerShell batch execution log
+│  ├─ <filename>_<hash>_<timestamp>.log     # IDA analysis logs
+│  ├─ symchk_<filename>_<timestamp>.log     # Symbol download logs (if enabled)
+│  └─ symchk_<filename>_<timestamp>.log.err # Symbol download error logs (if enabled)
 └─ idb_cache/
    └─ <filename>_<hash>.i64       # IDA database files
 ```

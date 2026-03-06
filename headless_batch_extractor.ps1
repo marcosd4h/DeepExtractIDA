@@ -1544,7 +1544,7 @@ function Write-AgentFiles {
     )
 
     $agentsContent = @'
-# DeepExtractIDA Analysis Workspace
+# DeepExtract AI Analysis Runtime
 
 > **MANDATORY SETUP -- READ THIS FIRST AND ACT IMMEDIATELY**
 >
@@ -1615,7 +1615,7 @@ ALL of the following MUST be true before you proceed:
 
 - `.agent/AGENTS.md` exists and is readable.
 - `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
-- `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, and `.agent/helpers/` directories exist.
+- `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, `.agent/helpers/`, `.agent/hooks/`, and `.agent/config/` directories exist.
 
 If any check fails, remove the partial installation and re-run from Step 1:
 
@@ -1656,7 +1656,7 @@ Re-run the same verification from the bootstrap section:
 
 - `.agent/AGENTS.md` exists and is readable.
 - `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
-- `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, and `.agent/helpers/` directories exist.
+- `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, `.agent/helpers/`, `.agent/hooks/`, and `.agent/config/` directories exist.
 
 ### Step 3 -- Report
 
@@ -1678,12 +1678,13 @@ that file as if it appeared here.
 `.agent/AGENTS.md` contains:
 
 - Quick rules and conventions for all analysis work
+- Workflow principles (plan-first, subagent usage, verification, elegance)
 - Getting-started workflow and slash command catalog (`/triage`, `/explain`, `/audit`, ...)
-- Architecture reference with dedicated sections for skills, commands, and agents (registries, catalogs, authoring guides)
+- Architecture reference and key directories table
+- Progressive-disclosure documentation index ("When You Need To..." lookup table)
 - Helper library developer reference (30+ modules, functional areas, import patterns)
-- Data layout, database schema, and JSON metadata format pointers
 - Conventions: error handling, JSON output, caching, workspace pattern, grind loop, hooks, registry maintenance
-- Testing instructions and documentation index
+- Testing instructions
 
 **Do not duplicate or summarize those instructions here.** Always defer to
 `.agent/AGENTS.md` for the complete and up-to-date reference.
@@ -1700,10 +1701,15 @@ these extraction outputs.
 DeepExtractIDA extraction layout:
 
 ```
+AGENTS.md                Bootstrap instructions (this file)
+CLAUDE.md                Pointer to AGENTS.md for Claude Code
+extraction_report.json   Batch extraction provenance and status
+
 extracted_code/          Decompiled C++ source, JSON metadata per module
   <module>/              e.g. appinfo_dll/, cmd_exe/, coredpus_dll/
     *.cpp                Grouped decompiled functions
     file_info.json       PE metadata and analysis report
+    file_info.md         Human-readable PE metadata summary
     function_index.json  Function-to-file index
     module_profile.json  Pre-computed module fingerprint
 
@@ -1711,7 +1717,8 @@ extracted_dbs/           Per-binary SQLite analysis databases
   <module>_<hash>.db     Individual analysis database (read-only)
   analyzed_files.db      Tracking database (module index)
 
-extraction_report.json   Batch extraction provenance and status
+idb_cache/               IDA database files (.i64) for re-analysis
+logs/                    IDA analysis logs and batch extractor log
 ```
 
 All extraction databases are **read-only**. Never write to them.
