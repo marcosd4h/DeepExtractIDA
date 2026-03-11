@@ -7,7 +7,7 @@ from PE binaries using IDA Pro, including:
 - VTable analysis and C++ class reconstruction
 - Indirect call resolution through data flow analysis
 - Jump table detection
-- Loop analysis using Tarjan's SCC algorithm
+- Loop analysis (dominator-based back edges, SCC fallback)
 - PE metadata extraction (imports, exports, resources, Rich header, TLS callbacks)
 - Stack frame analysis
 - String literal extraction
@@ -15,14 +15,13 @@ from PE binaries using IDA Pro, including:
 - Call validation with confidence scoring
 
 Main Entry Points:
-    - pe_file_context_extractor.main(): Main IDA script entry point
+    - pe_context_extractor.run_analysis_pipeline(): Main analysis pipeline
     - config.AnalysisConfig: Configuration dataclass
     - extractor_core.*: Public API for analysis functions
 """
 
-__version__ = "1.0.0"
-__author__ = "Stager Labs"
-__license__ = "Proprietary"
+__author__ = "Marcos Oviedo"
+__license__ = "MIT"
 
 # Core configuration
 from .config import AnalysisConfig
@@ -162,9 +161,6 @@ from .json_safety import (
 )
 
 __all__ = [
-    # Version
-    '__version__',
-    
     # Configuration
     'AnalysisConfig',
     

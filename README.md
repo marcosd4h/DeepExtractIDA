@@ -1,154 +1,260 @@
 # DeepExtract - PE Context Extraction Framework
 
-## Project Overview
+## Overview
 
-DeepExtract is an **IDA Pro 9.x Plugin** and **Headless Analysis Framework** designed primarily for **headless batch processing** of PE binaries to facilitate AI-assisted Vulnerability Research (VR).
+**DeepExtract** is an IDA Pro 9.x plugin that bridges the gap between compiled PE binaries and AI coding agents. It extracts the full structural context of a binary (PE metadata, function signatures, disassembly, decompiled C/C++ code, cross-references, control flow, and more), and writes it in formats that agents like **Claude Code**, **Codex**, and **Cursor** can directly ingest and reason over. The goal is to let these agents read, navigate, and understand PE files the same way they understand source code repositories, enabling **AI-assisted vulnerability research** and **reverse engineering** at scale.
 
-Traditional reverse engineering is manual and GUI-centric. This framework provides an automated interface for processing large datasets of PE (Portable Executable) files using IDA Pro's analysis engine. It transforms binary data—including assembly, control flow graphs, and decompiled code—into a **structured, AI-ready SQLite database**.
+Results are written to a per-binary SQLite database, generated as C++ source files organized by module, and accompanied by JSON metadata. DeepExtract operates in two modes: **headless** for automated batch processing of large binary datasets, and **interactive** for targeted single-binary analysis within the IDA GUI.
 
-**Architecture:** Built on IDA 9.x's `plugmod_t` plugin architecture, DeepExtract provides dual-mode operation:
+## How It Works
 
-- **Headless Mode**: Command-line batch processing for large-scale analysis
-- **Interactive Mode**: GUI integration for targeted analysis
+The extraction pipeline has three stages:
 
-By converting unstructured data into a queryable schema, this tool facilitates:
+```
+PE Binary (.exe/.dll/.sys)
+        |
+        v
+  IDA Pro 9.x + DeepExtract Plugin
+  (disassembly, decompilation, analysis)
+        |
+        v
+  Structured Output:
+    - SQLite database (per-binary)
+    - C++ source files (optional)
+    - JSON metadata (module_profile, function_index, file_info)
+```
 
-- **Programmatic Agentic Systems:** Utilize the structured SQLite output as a semantic knowledge base for **Research Agents** (e.g., via **LangGraph**) to perform automated code analysis and **Agentic Vulnerability Research**. This establishes a data layer for [Cyber Reasoning Systems (CRS)](https://www.hackerone.com/blog/cyber-reasoning-system-ai-security) to process binary logic at scale.
-- **AI-Native Code Review:** Export sanitized decompiled code to C++ for analysis in **Claude Code**, **Cursor**, or **Codex**, enabling LLMs to process function logic and data-flow invariants without the volume of unprocessed disassembly.
-- **Large-Scale Threat Hunting:** Automate the analysis of binaries to identify cross-ecosystem vulnerability patterns, insecure API usage, and structural characteristics.
+**Stage 1 - Binary Loading.** IDA Pro loads the PE file, performs auto-analysis, and builds its internal database (IDB). If PDB symbols are available, IDA resolves function names and type information.
 
-## Documentation
+**Stage 2 - Extraction.** DeepExtract iterates over every function in the IDB and extracts:
 
-Detailed technical references for the extraction formats and database schemas are available in the `docs/` directory:
+- Disassembly and Hex-Rays decompiled code (when available)
+- Inbound and outbound cross-references
+- Stack frame metrics, string literals, global variable accesses
+- Dangerous API calls, loop structures, vtable analysis (experimental), indirect call targets
 
-- [**Data Format Reference**](docs/data_format_reference.md): Technical specification of the SQLite schema, data architecture, and analysis heuristics.
-- [**Analysis Metadata and Reports Reference**](docs/file_info_format_reference.md): Technical specification of the generated `file_info.md`, `file_info.json`, and C++ code output structure.
-- [**Function Index Format Reference**](docs/function_index_format_reference.md): Format and purpose of `function_index.json`, the lightweight function-to-file lookup index with library tagging.
-- [**Module Profile Format Reference**](docs/module_profile_format_reference.md): Format and computation of `module_profile.json`, the pre-computed module fingerprint covering identity, scale, library composition, API surface, complexity, and security posture.
+At the file level, it extracts PE headers, imports, exports, sections, security features, Rich header data, TLS callbacks, and .NET CLR metadata.
 
-## Use Cases
+**Stage 3 - Output.** All extracted data is written to a SQLite database. When C++ generation is enabled, the plugin groups decompiled functions into source files organized by class and module, and generates JSON metadata files (`function_index.json`, `module_profile.json`, `file_info.json`) alongside a human-readable report (`file_info.md`).
 
-The primary purpose of DeepExtract is to extract structured data from PE binaries to support specialized research workflows. The following use cases demonstrate the application of this data in automated and interactive research. Detailed documentation for each case is **pending** and will be released in the coming days.
+## Key Concepts
 
-### AI-Assisted Code Understanding (Cursor / Claude Code)
+- **PE (Portable Executable):** The binary format used by Windows for executables (`.exe`), dynamic libraries (`.dll`), and drivers (`.sys`). PE files contain code sections, import/export tables, resource data, and metadata headers.
 
-This use case demonstrates the **headless extractor** feature by generating the necessary context for AI grounding. The tool exports a structured C++ representation of the binary into the `extracted_code/` directory, organized by module folders.
+- **IDA Pro:** A disassembler and reverse engineering platform. IDA loads a binary, identifies functions, resolves cross-references, and builds a navigable representation of the code. The analysis results are stored in an IDA database (`.idb` / `.i64`).
 
-- **Grounding Architecture**: LLMs (e.g., Claude Code, Cursor) utilize the generated `.cpp` files and `file_info.md` index to evaluate implementation logic.
-- **Workflow**: A researcher uses Cursor to audit specific functions, such as `ShellExecuteW`. The AI leverages the local context to explain parameters, detect call patterns, and identify logical invariants.
-- **Reporting**: Automated generation of technical reports based on the source-level representation of decompiled logic.
-- **Runtime Integration**: For structured, repeatable analysis workflows on top of this extracted output, see the [AI Analysis Runtime](#ai-analysis-runtime) section below.
+- **Hex-Rays Decompiler:** An IDA Pro component that converts disassembled machine code into a C-like pseudo-code representation. DeepExtract stores this output as `decompiled_code` for each function.
 
-### Interactive Analysis & Structured Data Export
+- **Cross-references (xrefs):** Records of which functions call which other functions. **Inbound xrefs** list all callers of a function; **outbound xrefs** list all functions it calls. These form the binary's call graph.
 
-This use case focuses on the **interactive UI plugin** for targeted analysis of individual binaries. It is designed to capture the latest state of a researcher's session, including renamed variables, custom comments, and manual type definitions stored in the `.idb`/`.i64`.
+- **Headless mode:** Running IDA Pro from the command line without a GUI, using `idat.exe` / `idat64.exe` with the `-A` flag. DeepExtract detects this mode and runs the full extraction pipeline automatically on startup.
 
-- **Data Capture**: The plugin exports the current IDA database state into a structured SQLite database.
-- **Schema Visibility**: Researchers can query the `functions` and `file_info` tables to analyze data types, cross-references, and metadata directly via SQL.
-- **Session Integration**: Facilitates the transfer of manual reverse engineering insights into a format compatible with external analysis tools.
+- **Structured output:** The SQLite database and optional C++ files produced by DeepExtract. The database contains three tables (`file_info`, `functions`, `function_xrefs`) and is designed for programmatic queries by SQL, Python, or AI agent frameworks.
 
-### Deep Research Agents via Callgraph Traversal
+## Quick Start
 
-Automated agents utilize the **LangGraph Deep Agent abstraction** to perform semantic reasoning across the binary's execution graph using structured `inbound_xrefs` and `outbound_xrefs`.
-
-- **Callgraph Reasoning**: Agents traverse the `simple_outbound_xrefs` to evaluate reachability and component dependencies.
-- **Automated Synthesis**: The system generates high-level technical summaries of subroutines by analyzing their position and interactions within the global callgraph.
-
-### Autonomous Vulnerability Research (Claude Agent SDK)
-
-This configuration implements an autonomous auditor using the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview).
-
-- **Skill-Based Extraction**: The agent utilizes "Skills" to interface with the SQLite backend, retrieving decompiled code and cross-reference data on-demand.
-- **Primitive Discovery**: Automated scanning for vulnerability sinks (e.g., insecure API usage) grounded by the structured data layer.
-- **Fail-Safe Monitoring**: Evaluation of complex logical paths where standard automated heuristics may require agentic verification.
-
-## AI Analysis Runtime
-
-The extraction output produced by DeepExtract is designed to be operationalized through [**DeepExtractRuntime**](https://github.com/marcosd4h/DeepExtractRuntime) -- a companion AI-driven analysis runtime that turns raw decompiled code and SQLite databases into structured, queryable binary intelligence. The runtime deploys as an `.agent/` directory alongside the extraction data and operates natively across **Claude Code**, **Cursor**, **Codex CLI**, **Gemini**, and any AI coding harness that supports `AGENTS.md` or equivalent agent configuration conventions.
-
-**Architecture:** Commands &rarr; Agents &rarr; Skills &rarr; Helpers &rarr; Data (extraction DBs + JSON)
-
-The runtime provides:
-
-- **Slash commands** for interactive analysis workflows: `/triage`, `/audit`, `/explain`, `/lift-class`, `/trace-export`, `/data-flow`, `/taint`, `/hunt`, `/state-machines`, `/full-report`, and others.
-- **Specialized agents** (code-lifter, re-analyst, triage-coordinator, type-reconstructor, verifier) that orchestrate multi-step analysis pipelines in isolated contexts.
-- **20+ analysis skills** spanning function classification, call graph tracing, taint analysis, COM/WRL interface reconstruction, attack surface mapping, security dossier generation, type reconstruction, and decompiler verification.
-- **30+ shared helper modules** providing database access, function resolution, API taxonomy (17 functional + 11 security categories), assembly metrics, struct scanning, caching, and cross-module graph analysis.
-- **Lifecycle hooks** that automatically inject module context at session start and support batch processing through grind loops.
-
-This enables researchers to move from raw extraction output to structured security assessments, function-level audits, and full module reports through conversational AI workflows -- without writing custom scripts or queries.
-
-See the [DeepExtractRuntime README](https://github.com/marcosd4h/DeepExtractRuntime) and its [Onboarding Guide](https://github.com/marcosd4h/DeepExtractRuntime/blob/main/docs/ONBOARDING.md) for setup and usage.
-
-## Extraction Capabilities
-
-The extractor performs hierarchical analysis, transitioning from global binary metadata to function-level data.
-
-### Binary & Metadata Extraction (File Level)
-
-The tool captures over 30+ metadata points for every binary, creating a comprehensive **metadata profile** for the file:
-
-- **Identification & Hashes:** MD5, SHA256, file size, and extension.
-- **PE Header Intelligence:** Extraction of `sections`, `entry_point` JSON, `rich_header` (linker data), and `tls_callbacks`.
-- **Version & Authenticity:** Product/Company names, legal copyright, original filenames, and internal PDB paths (`pdb_path`).
-- **Security Posture:** `dll_characteristics` and `security_features` (ASLR, DEP, NX), along with `load_config` and `exception_info`.
-- **Runtime Environment:** Detection of `.NET` assemblies (`is_net_assembly`) and full `clr_metadata` extraction.
-
-### Function-Level Analysis
-
-For every identified function, the tool extracts:
-
-- **Identity & Signatures:** Both `function_signature` and `function_signature_extended`, including demangled and mangled names.
-- **Assembly & Decompiled Code:** Full `assembly_code` and high-level `decompiled_code` (if Hex-Rays is available) are stored for direct semantic analysis.
-
-### Security Context & Semantic Analysis
-
-Beyond raw code, the tool performs deep heuristics to find vulnerability signals:
-
-- **Dangerous API Detection:** Scans for 480+ security-critical APIs (e.g., `strcpy`, `CreateProcess`) stored in `dangerous_api_calls`.
-- **String & Data Analysis:** Extracts `string_literals` and `global_var_accesses` specific to each function.
-- **Stack & Memory Intelligence:** Detailed `stack_frame` layouts and variable sizes to identify potential overflow primitives.
-- **Loop Intelligence:** Implements **Tarjan’s Algorithm** for `loop_analysis`, identifying natural loops, infinite loops, and cyclomatic complexity.
-
-### Relationship & Control Flow Intelligence
-
-- **Graph Connectivity:** Full `inbound_xrefs` (callers) and `outbound_xrefs` (callees), including "simple" versions for faster graph traversal.
-- **C++ Reconstruction:** Resolves `vtable_contexts` and trace virtual function calls to reconstruct class hierarchies and polymorphism logic.
-
-## Usage Guide
-
-### Installation
-
-DeepExtract supports multiple deployment methods:
-
-- **Plugin Deployment**: Installation into the IDA plugins directory for integrated headless and interactive execution.
-- **Standalone Execution**: Execution directly from the source directory.
-
-To install as a plugin, you can use `hcli`:
+**Install the plugin:**
 
 ```bash
 hcli plugin install DeepExtract
 ```
 
-### Headless Batch Extraction (PowerShell Script)
+**Extract a single binary (headless):**
 
-For large-scale analysis, clone the repository and use the `headless_batch_extractor.ps1` PowerShell script to automate batch processing with concurrent IDA instances.
+```cmd
+"C:\Program Files\IDA Professional 9.2\idat.exe" -A -L"C:\output\log.txt" -S"main.py --sqlite-db C:\output\kernel32.db --generate-cpp" "C:\Windows\System32\kernel32.dll"
+```
 
-#### Features
+**Batch-extract a directory:**
 
-- **Three Extraction Modes:**
-  - **Directory Scan**: Scan one or more directories for PE files, with independent control over recursive (`-ExtractDirRecursive`) and non-recursive (`-ExtractDir`) scanning -- both can be combined
-  - **File List**: Process files from a text list (one path per line)
-  - **PID Mode**: Extract all modules loaded by one or more running processes
-- **Automatic Symbol Downloading**: Pre-downloads PDB symbols from Microsoft's symbol server using `symchk.exe` before IDA analysis (enabled by default, requires Windows SDK Debugging Tools)
-- **IDA Auto-Detection**: Automatically identifies the IDA installation (9.x series)
-- **Concurrent Processing**: Spawns multiple IDA processes (default: 4) for parallel analysis
-- **Conditional Filtering**: Tracks analyzed files to prevent redundant processing
-- **Detailed Logging**: Per-file logs and error reporting
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Windows\System32" -StorageDir "C:\Analysis"
+```
+
+**Interactive mode:** Open a binary in IDA Pro, then Edit > Plugins > DeepExtract (or `Ctrl-Shift-E`).
+
+## Extraction Capabilities
+
+The extractor operates at two levels: file-level metadata and per-function analysis.
+
+### File-Level Metadata
+
+The plugin extracts 30+ metadata points per binary:
+
+- **Identification:** MD5, SHA256, file size, extension
+- **PE headers:** Sections, entry points, Rich header (linker toolchain data), TLS callbacks
+- **Version information:** Product name, company name, copyright, original filename, PDB path
+- **Security features:** ASLR, DEP/NX, CFG, SafeSEH status, DLL characteristics
+- **Runtime environment:** .NET assembly detection, CLR metadata, delay-load DLL imports
+
+### Function-Level Analysis
+
+For every identified function:
+
+- **Signatures:** Base and extended function signatures, including demangled and mangled names
+- **Code:** Full disassembly and Hex-Rays decompiled C/C++ output
+- **Cross-references:** Inbound and outbound xrefs in full and simplified formats, plus a deduplicated relational table for SQL-based call graph queries
+- **Dangerous API detection:** Matches outbound calls against 480+ security-critical APIs (e.g., CreateRemoteThread, LoadLibrary, CreateProcessW)
+- **String literals:** Per-function string references
+- **Global variable accesses:** Read/write references to global data
+- **Stack frame analysis:** Aggregate frame sizes (locals, arguments, saved registers), frame pointer and exception handler flags, and stack canary detection via multi-heuristic analysis (variable names, security cookie calls, XOR patterns)
+- **Loop analysis:** Natural loop detection via dominator-based back edges with SCC fallback for irreducible control flow, per-loop cyclomatic complexity, and infinite loop heuristic (zero exit edges)
+- **VTable analysis (experimental):** Virtual call resolution for `[reg+offset]` call patterns, vtable slot inspection, and per-class method grouping from demangled names. Limited to single vtable at object offset 0; no multiple/virtual inheritance, thunk handling, or RTTI-based class hierarchy inference
+- **Indirect call resolution (experimental):** Backward pattern matching to resolve common indirect call and jump patterns (register loads, memory dereferences, function pointer arrays), jump table detection via IDA's switch analysis with manual fallback, and basic obfuscation handling (XOR/ADD/SUB transforms). Coverage is limited to intra-procedural heuristics within a short instruction window
+
+## Output Architecture
+
+### SQLite Database
+
+Each binary produces a SQLite database containing three tables.
+
+**`file_info`** stores binary-level metadata:
+
+- `file_path`, `file_name`, `file_extension`, `file_size_bytes`
+- `md5_hash`, `sha256_hash`
+- `imports`, `exports`, `entry_point`
+- `file_version`, `product_version`, `company_name`, `pdb_path`
+- `rich_header`, `tls_callbacks`, `is_net_assembly`, `clr_metadata`
+- `dll_characteristics`, `security_features`, `exception_info`
+
+**`functions`** stores per-function analysis data:
+
+- `function_signature`, `mangled_name`, `function_name`
+- `assembly_code`, `decompiled_code`
+- `inbound_xrefs`, `outbound_xrefs` (full and simple JSON)
+- `vtable_contexts`, `global_var_accesses`, `dangerous_api_calls`
+- `string_literals`, `stack_frame`, `loop_analysis`
+- `analysis_errors`, `created_at`
+
+**`function_xrefs`** stores deduplicated cross-references for SQL-based call graph queries:
+
+- `source_id`, `target_id` (foreign keys into `functions`)
+- `target_name`, `target_module`
+- `function_type` (generic, library, API, vtable, etc.)
+- `xref_type`, `direction` (inbound/outbound)
+- Unique constraint on `(source_id, target_id, target_name, target_module, xref_type, direction)`
+
+### C++ Output (Optional)
+
+When `--generate-cpp` is enabled, the plugin writes decompiled functions as grouped C++ source files:
+
+- **Class methods:** Grouped by class into files of approximately 450-500 lines, named `{module}_{class}_group_N.cpp`. Methods are ordered alphabetically; each is preceded by a comment block with its name and signature.
+- **Standalone functions:** Grouped into files of approximately 450-500 lines, named `{module}_standalone_group_N.cpp`, with the same ordering and comment conventions.
+- **`function_index.json`:** Maps every function name to its `.cpp` file and library tag (WIL, STL, WRL, CRT, ETW/TraceLogging, or `null` for application code). See the [Function Index Format Reference](docs/function_index_format_reference.md).
+- **`module_profile.json`:** Pre-computed module fingerprint covering identity, scale, library composition, API surface, complexity metrics, and security posture. See the [Module Profile Format Reference](docs/module_profile_format_reference.md).
+- **`file_info.md` / `file_info.json`:** Human-readable and machine-readable analysis reports. See the [Analysis Metadata and Reports Reference](docs/file_info_format_reference.md).
+
+## Usage Guide
+
+### Installation
+
+DeepExtract supports two deployment methods:
+
+- **Plugin deployment:** Install into the IDA plugins directory. Once installed, the plugin is available in the GUI via Edit > Plugins > DeepExtract (or `Ctrl-Shift-E`) for interactive single-binary analysis, and via the command line for headless batch processing.
+- **Standalone execution:** Clone the repository and run headless extraction directly from the source directory. See [Headless Batch Extraction](#headless-batch-extraction-powershell) and [Headless Mode (Individual File)](#headless-mode-individual-file) below.
+
+To install as a plugin:
+
+```bash
+hcli plugin install DeepExtract
+```
+
+### Interactive Mode (GUI)
+
+When a binary is open in IDA Pro, the plugin runs within the GUI and is accessible via:
+
+- **Menu:** Edit > Plugins > DeepExtract
+- **Hotkey:** `Ctrl-Shift-E`
+
+This mode is designed for targeted analysis of a single binary. It presents a configuration dialog for:
+
+- **Output paths:** SQLite database path and C++ output directory
+- **Feature selection:** Dangerous APIs, strings, loops, stack frames
+- **PE metadata:** Metadata extraction, Advanced PE, runtime info
+- **Analysis parameters:** Thunk resolution depth and call validation confidence threshold
+- **Progress monitoring:** Status indicator for the analysis pipeline
+
+The interactive mode captures the current state of the researcher's IDA session, including renamed variables, custom comments, and manual type definitions stored in the `.idb`/`.i64`.
+
+### Headless Batch Extraction (PowerShell)
+
+The headless batch extractor processes PE binaries at scale without IDA's GUI. It accepts directories, file lists, or running process IDs as input, spawns concurrent IDA instances, and writes structured output (SQLite databases, C++ source files, JSON metadata) to a storage directory. The output is organized per-module and ready for analysis through AI agents such as Cursor or Claude Code via [DeepExtractRuntime](https://github.com/marcosd4h/DeepExtractRuntime).
+
+**Resource expectations:** Batch extraction of large binary sets can run for several days and produce tens to hundreds of gigabytes of output depending on the number and size of modules. Plan disk space and machine availability accordingly.
+
+Typical applications:
+
+- **Process context capture:** Extract all modules loaded by a running process (`-TargetPid`) to reconstruct the full execution context of a target application, service, or malware sample.
+- **OS internals analysis:** Extract `C:\Windows\System32` to build a queryable, decompiled representation of Windows usermode libraries for understanding OS functionality, API behavior, and inter-component dependencies.
+- **Targeted binary auditing:** Point the extractor at a specific set of binaries to produce structured data for vulnerability research, threat hunting, or code review workflows.
+
+#### Setup
+
+Clone the repository:
+
+```powershell
+git clone https://github.com/marcosd4h/DeepExtractIDA.git
+cd DeepExtractIDA
+```
+
+The script requires IDA Pro 9.x installed on the system. It auto-detects the IDA installation path; no additional configuration is needed. Run the extractor directly from the cloned directory:
+
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Windows\System32" -StorageDir "C:\funvr\system32_internals"
+```
+
+The script locates IDA, iterates over all PE files in the target directory, downloads PDB symbols (enabled by default), and launches concurrent IDA processes to extract each binary. Results are written to `StorageDir`, organized by module, with each module producing a SQLite database, C++ source files, and JSON metadata.
+
+#### Extraction Modes
+
+The script supports three input modes, which can be combined in a single invocation:
+
+- **Directory scan:** `-ExtractDirRecursive` for recursive scanning, `-ExtractDir` for top-level only. Both accept comma-separated lists and can be used together.
+- **File list:** `-FilesToAnalyze` accepts a text file with one path per line.
+- **PID mode:** `-TargetPid` extracts all modules loaded by one or more running processes (comma-separated PIDs).
+
+Files from all sources are merged into one batch and deduplicated. C++ code generation is enabled by default in batch mode; disable with `-NoGenerateCpp`.
+
+Additional batch parameters:
+
+| Flag                      | Description                                          |
+| ------------------------- | ---------------------------------------------------- |
+| `-MaxConcurrentProcesses` | Number of parallel IDA processes (default: 4)        |
+| `-StorageDir`             | Output directory for all analysis results (required) |
+| `-IdaPath`                | Path to IDA executable (auto-detected if omitted)    |
+
+#### Output Directory Structure
+
+```
+<StorageDir>/
+├── AGENTS.md                      # AI agent runtime bootstrap (Cursor/Codex)
+├── CLAUDE.md                      # AI agent runtime bootstrap (Claude Code)
+├── analyzed_modules_list.txt      # List of files analyzed (all modes)
+├── extraction_report.json         # Summary report with success/failure stats
+├── analyzed_files.db              # Master tracking database
+├── extracted_dbs/
+│   └── <filename>_<hash>.db       # Individual analysis databases (one per file)
+├── extracted_code/
+│   └── <module_name>/             # Per-module output directory
+│      ├── *.cpp                   # Generated C++ code (unless -NoGenerateCpp)
+│      ├── function_index.json     # Function-to-file lookup index
+│      ├── module_profile.json     # Pre-computed module fingerprint
+│      ├── file_info.json          # Structured analysis metadata
+│      └── file_info.md            # Human-readable analysis report
+├── logs/
+│   ├── batch_extractor_<timestamp>.log       # PowerShell batch execution log
+│   ├── <filename>_<hash>_<timestamp>.log     # IDA analysis logs
+│   ├── symchk_<filename>_<timestamp>.log     # Symbol download logs (if enabled)
+│   └── symchk_<filename>_<timestamp>.log.err # Symbol download error logs (if enabled)
+└── idb_cache/
+    └── <filename>_<hash>.i64      # IDA database files
+```
+
+The `extraction_report.json` contains: extraction timestamp and mode, summary statistics (total, successful, failed), list of successfully extracted files with paths, and list of failed extractions with error details.
 
 #### IDA Auto-Detection
 
-The script automatically searches for IDA Pro installations in common paths:
+The script searches for IDA Pro 9.x installations in standard paths:
 
 ```
 C:\Program Files\IDA Professional 9.x\
@@ -157,112 +263,19 @@ C:\Program Files (x86)\IDA Professional 9.x\
 C:\Program Files (x86)\IDA Pro 9.x\
 ```
 
-The latest version is selected automatically. Override with `-IdaPath` parameter.
-
-#### Usage Examples
-
-**Directory Scan Mode (Recursive)**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Windows\System32" -StorageDir "C:\Analysis"
-```
-
-Recursively scans all PE files in System32 and subdirectories.
-
-**Non-Recursive Scan (Top-Level Only)**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Windows" -StorageDir "C:\Analysis"
-```
-
-Scans only the top-level PE files in the directory, without descending into subdirectories.
-
-**Mixed Recursive and Non-Recursive**
-
-```powershell
-.\headless_batch_extractor.ps1 `
-    -ExtractDirRecursive "C:\Windows\System32","C:\Windows\SystemApps" `
-    -ExtractDir "C:\Windows" `
-    -StorageDir "C:\Analysis"
-```
-
-Recursively scans `System32` and `SystemApps`, while scanning only top-level files in `C:\Windows`. Files from all sources are merged into one batch and deduplicated.
-
-**File List Mode**
-
-```powershell
-.\headless_batch_extractor.ps1 -FilesToAnalyze "targets.txt" -StorageDir "C:\Analysis"
-```
-
-Where `targets.txt` contains:
-
-```
-C:\Windows\System32\kernel32.dll
-C:\Windows\System32\ntdll.dll
-C:\Program Files\MyApp\app.exe
-```
-
-**PID Mode (Process Module Extraction)**
-
-```powershell
-.\headless_batch_extractor.ps1 -TargetPid 1234 -StorageDir "C:\Analysis"
-```
-
-Extracts all modules loaded by process ID 1234.
-
-**Multiple PIDs**
-
-```powershell
-.\headless_batch_extractor.ps1 -TargetPid 1234,5678 -StorageDir "C:\Analysis"
-```
-
-Extracts modules from multiple processes. Modules are merged into one batch and deduplicated.
-
-**Custom IDA Path**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Malware" -StorageDir "C:\Analysis" -IdaPath "C:\IDA92\idat64.exe"
-```
-
-**Disable Specific Features (Faster Analysis)**
-
-```powershell
-# Skip string extraction and C++ generation for faster processing
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -NoExtractStrings -NoGenerateCpp
-```
-
-**Adjust Concurrency**
-
-```powershell
-# Run 8 concurrent IDA processes (for high-core systems)
-.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
-```
-
-**Skip Symbol Downloading**
-
-```powershell
-# Disable automatic PDB downloading for faster startup
-.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Binaries" -StorageDir "C:\Analysis" -NoDownloadSymbols
-```
-
-**Custom Symbol Store Path**
-
-```powershell
-# Store symbols on a separate drive
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -SymbolStorePath "D:\MySymbols"
-```
+The latest version is selected. Override with the `-IdaPath` parameter.
 
 #### Symbol Downloading
 
-The script automatically downloads PDB debug symbols from Microsoft's public symbol server before running IDA analysis. This enables IDA to resolve function names, type information, and produce richer decompiled output.
+The script downloads PDB debug symbols from Microsoft's public symbol server before IDA analysis. This is enabled by default and allows IDA to resolve function names and type information for richer output.
 
-- **Enabled by default** -- disable with `-NoDownloadSymbols`
-- **Per-file downloads** -- only downloads symbols for the exact files being analyzed
-- **Concurrent** -- runs up to 10 parallel `symchk.exe` processes
-- **Cached** -- symbols are stored in a local symbol store (default: `C:\symbols`) and reused across runs
-- **Environment variable** -- automatically sets `_NT_SYMBOL_PATH` at user level (no admin required)
+- Enabled by default; disable with `-NoDownloadSymbols`
+- Downloads symbols only for the files being analyzed
+- Runs up to 10 parallel `symchk.exe` processes
+- Stores symbols in a local cache (default: `C:\symbols`), reused across runs
+- Sets `_NT_SYMBOL_PATH` at user level (no admin required)
 
-**Requirements:** `symchk.exe` from the [Windows SDK Debugging Tools](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/). The script auto-detects it from standard Windows SDK installation paths, or you can specify it manually with `-SymchkPath`.
+Requires `symchk.exe` from the [Windows SDK Debugging Tools](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/). The script auto-detects it from standard Windows SDK paths, or accepts a manual path via `-SymchkPath`.
 
 | Flag                 | Description                                           |
 | -------------------- | ----------------------------------------------------- |
@@ -275,11 +288,11 @@ The script automatically downloads PDB debug symbols from Microsoft's public sym
 
 | Flag                      | Description                                 |
 | ------------------------- | ------------------------------------------- |
-| `-NoExtractDangerousApis` | Skip dangerous API detection (300+ APIs)    |
+| `-NoExtractDangerousApis` | Skip dangerous API detection (480+ APIs)    |
 | `-NoExtractStrings`       | Skip string literal extraction              |
 | `-NoExtractStackFrame`    | Skip stack frame analysis                   |
 | `-NoExtractGlobals`       | Skip global variable tracking               |
-| `-NoAnalyzeLoops`         | Skip loop analysis (Tarjan's algorithm)     |
+| `-NoAnalyzeLoops`         | Skip loop analysis                          |
 | `-NoPeInfo`               | Skip PE version information extraction      |
 | `-NoPeMetadata`           | Skip PE metadata extraction                 |
 | `-NoAdvancedPe`           | Skip Rich header and TLS callback analysis  |
@@ -287,81 +300,85 @@ The script automatically downloads PDB debug symbols from Microsoft's public sym
 | `-ForceReanalyze`         | Force re-analysis even if already processed |
 | `-NoGenerateCpp`          | Skip C++ code generation for AI review      |
 
-#### Output Structure
+#### Usage Examples
 
-```
-<StorageDir>/
-├─ AGENTS.md                      # AI agent runtime bootstrap (Cursor/Claude Code)
-├─ CLAUDE.md                      # AI agent runtime bootstrap (Claude Code)
-├─ analyzed_modules_list.txt      # List of files analyzed (all modes)
-├─ extraction_report.json         # Summary report with success/failure stats
-├─ analyzed_files.db              # Master tracking database
-├─ extracted_dbs/
-│  └─ <filename>_<hash>.db        # Individual analysis databases (one per file)
-├─ extracted_code/
-│  └─ <module_name>/              # Per-module output directory
-│     ├─ *.cpp                    # Generated C++ code (if --generate-cpp)
-│     ├─ function_index.json      # Function-to-file lookup index
-│     ├─ module_profile.json      # Pre-computed module fingerprint
-│     ├─ file_info.json           # Structured analysis metadata
-│     └─ file_info.md             # Human-readable analysis report
-├─ logs/
-│  ├─ batch_extractor_<timestamp>.log       # PowerShell batch execution log
-│  ├─ <filename>_<hash>_<timestamp>.log     # IDA analysis logs
-│  ├─ symchk_<filename>_<timestamp>.log     # Symbol download logs (if enabled)
-│  └─ symchk_<filename>_<timestamp>.log.err # Symbol download error logs (if enabled)
-└─ idb_cache/
-   └─ <filename>_<hash>.i64       # IDA database files
-```
-
-The `extraction_report.json` contains:
-
-- Extraction timestamp and mode
-- Summary statistics (total, successful, failed)
-- List of successfully extracted files with paths
-- List of failed extractions with error details
-
-#### Getting Help
+**Directory scan (recursive):**
 
 ```powershell
-# Display built-in help with colorized output
-.\headless_batch_extractor.ps1 -Help
-
-# Use PowerShell's Get-Help for detailed parameter documentation
-Get-Help .\headless_batch_extractor.ps1 -Detailed
-
-# Show all available parameters
-Get-Help .\headless_batch_extractor.ps1 -Full
-
-# Show usage examples only
-Get-Help .\headless_batch_extractor.ps1 -Examples
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Windows\System32" -StorageDir "C:\funvr\system32_internals"
 ```
 
-#### Enterprise Workflow Example
+**Non-recursive scan (top-level only):**
 
 ```powershell
-# Phase 1: Initial scan of system binaries (skip C++ for speed)
-.\headless_batch_extractor.ps1 `
-    -ExtractDirRecursive "C:\Windows\System32" `
-    -StorageDir "C:\Analysis\SystemBinaries" `
-    -NoGenerateCpp `
-    -MaxConcurrentProcesses 8
+.\headless_batch_extractor.ps1 -ExtractDir "C:\Windows" -StorageDir "C:\funvr\windows_root_internals"
+```
 
-# Phase 2: Targeted analysis of specific malware samples with full extraction
-.\headless_batch_extractor.ps1 `
-    -FilesToAnalyze "C:\Samples\targets.txt" `
-    -StorageDir "C:\Analysis\MalwareSamples" `
-    -MaxConcurrentProcesses 4
+**Mixed recursive and non-recursive:**
 
-# Phase 3: Runtime module extraction from suspicious processes
+```powershell
 .\headless_batch_extractor.ps1 `
-    -TargetPid 5678,9012 `
-    -StorageDir "C:\Analysis\RuntimeExtraction"
+    -ExtractDirRecursive "C:\Windows\System32","C:\Windows\SystemApps" `
+    -ExtractDir "C:\Windows" `
+    -StorageDir "C:\funvr\more_windows_internals"
+```
+
+**File list mode:**
+
+```powershell
+.\headless_batch_extractor.ps1 -FilesToAnalyze "targets.txt" -StorageDir "C:\funvr\vr_campaign1""
+```
+
+Where `targets.txt` contains:
+
+```
+C:\Windows\System32\kernel32.dll
+C:\Windows\System32\ntdll.dll
+C:\Program Files\MyApp\app.exe
+```
+
+**PID mode (single and multiple processes):**
+
+```powershell
+.\headless_batch_extractor.ps1 -TargetPid 1234 -StorageDir "C:\Analysis"
+.\headless_batch_extractor.ps1 -TargetPid 1234,5678 -StorageDir "C:\Analysis"
+```
+
+**Custom IDA path:**
+
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDir "C:\Malware" -StorageDir "C:\Analysis" -IdaPath "C:\IDA92\idat64.exe"
+```
+
+**Disable features for faster processing:**
+
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -NoExtractStrings -NoGenerateCpp
+```
+
+**Adjust concurrency:**
+
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
+```
+
+**Skip symbol downloading:**
+
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Binaries" -StorageDir "C:\Analysis" -NoDownloadSymbols
+```
+
+**Custom symbol store path:**
+
+```powershell
+.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -SymbolStorePath "D:\MySymbols"
 ```
 
 #### Full Windows Codebase Extraction
 
-By targeting the key OS directories together, you can extract and decompile virtually the entire Windows usermode codebase into structured, AI-queryable C++ and SQLite databases in a single batch run. Use `-ExtractDirRecursive` for directories with rich subdirectory trees and `-ExtractDir` for top-level-only locations:
+These examples target key OS directories to extract and decompile the Windows usermode codebase into SQLite databases and C++ source files.
+
+**Core OS libraries:**
 
 ```powershell
 .\headless_batch_extractor.ps1 `
@@ -371,9 +388,9 @@ By targeting the key OS directories together, you can extract and decompile virt
     -MaxConcurrentProcesses 8
 ```
 
-This covers core OS libraries (`System32`), modern UWP/packaged apps (`SystemApps`, `ImmersiveControlPanel`), shared frameworks (`Common Files`), and input method components (`IME`) recursively, plus top-level PE files directly under `C:\Windows` (e.g. `explorer.exe`, `regedit.exe`, `notepad.exe`).
+Covers `System32` (core libraries), `SystemApps` and `ImmersiveControlPanel` (UWP/packaged apps), `Common Files` (shared frameworks), and `IME` (input method components) recursively, plus top-level PE files under `C:\Windows` (e.g., `explorer.exe`, `regedit.exe`).
 
-**Extended -- add SysWOW64 (32-bit) and kernel drivers:**
+**Extended with SysWOW64 and kernel drivers:**
 
 ```powershell
 .\headless_batch_extractor.ps1 `
@@ -385,7 +402,7 @@ This covers core OS libraries (`System32`), modern UWP/packaged apps (`SystemApp
 
 Adds 32-bit system libraries (`SysWOW64`) and kernel-mode drivers (`.sys` files under `drivers`).
 
-**Maximum coverage -- include all installed applications:**
+**Maximum coverage (all installed applications):**
 
 ```powershell
 .\headless_batch_extractor.ps1 `
@@ -395,12 +412,10 @@ Adds 32-bit system libraries (`SysWOW64`) and kernel-mode drivers (`.sys` files 
     -MaxConcurrentProcesses 8
 ```
 
-Covers the entire OS plus all installed third-party applications.
-
-**Speed-optimized -- two-pass extraction:**
+**Two-pass extraction (DB first, C++ second):**
 
 ```powershell
-# Pass 1: fast DB-only extraction (skip C++ generation)
+# Pass 1: DB-only extraction (skip C++ generation)
 .\headless_batch_extractor.ps1 `
     -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
     -ExtractDir 'C:\Windows' `
@@ -417,29 +432,35 @@ Covers the entire OS plus all installed third-party applications.
     -MaxConcurrentProcesses 8
 ```
 
-The first pass builds SQLite databases quickly without C++ overhead. The second pass re-analyzes with full C++ code generation. Useful when you want queryable databases available as soon as possible.
+The first pass builds SQLite databases without C++ overhead. The second pass re-analyzes with full C++ generation. This is useful when queryable databases are needed as quickly as possible.
 
-### Headless Mode (Individual File Extraction)
+#### Getting Help
 
-For single-file analysis or custom scripting, run the plugin directly in headless mode using IDA's command-line tool (`idat.exe` or `idat64.exe`).
+```powershell
+.\headless_batch_extractor.ps1 -Help
+Get-Help .\headless_batch_extractor.ps1 -Detailed
+Get-Help .\headless_batch_extractor.ps1 -Full
+Get-Help .\headless_batch_extractor.ps1 -Examples
+```
 
-**Example: Analyze a single binary**
+### Headless Mode (Individual File)
+
+For single-file analysis or custom scripting, invoke the plugin directly via IDA's command-line tool (`idat.exe` or `idat64.exe`).
 
 ```cmd
 "C:\Program Files\IDA Professional 9.2\idat.exe" -A -L"C:\temp\pe_extraction_tests\output.log" -S"main.py --sqlite-db C:\temp\pe_extraction_tests\bitlockercsp.db" "C:\windows\system32\bitlockercsp.dll"
 ```
 
-**Command-Line Arguments:**
+**IDA command-line arguments:**
 
 - `-A`: Autonomous mode (no GUI)
 - `-L`: Log file path
 - `-S`: Plugin script to execute (`main.py`)
 - `--sqlite-db`: Absolute path to the output SQLite database (required)
 
-**Optional Analysis Flags:**
+**Optional analysis flags:**
 
 ```cmd
-# Disable specific extraction features
 --no-extract-dangerous-apis   # Skip dangerous API detection
 --no-extract-strings          # Skip string literal extraction
 --no-extract-stack-frame      # Skip stack frame analysis
@@ -450,133 +471,137 @@ For single-file analysis or custom scripting, run the plugin directly in headles
 --no-advanced-pe              # Skip Rich header/TLS callbacks
 --no-runtime-info             # Skip .NET/delay-load analysis
 
-# Additional options
 --force-reanalyze            # Force re-analysis even if already complete
 --generate-cpp               # Generate C++ output files for AI review
 --cpp-output-dir <path>      # Custom directory for C++ output (defaults to extracted_raw_code/ next to db)
---thunk-depth N              # Maximum thunk resolution depth (default: 10)
+--thunk-depth N              # Maximum thunk resolution depth (default: 5)
 --min-call-conf N            # Minimum confidence for call validation (10-100)
 ```
 
-### Interactive Mode (GUI)
+## Use Cases
 
-When a binary is open in the IDA Pro GUI, the plugin is accessible via:
+DeepExtract produces structured data for several research workflows. Detailed documentation for each is in progress.
 
-- **Menu**: Edit → Plugins → DeepExtract
-- **Hotkey**: `Ctrl-Shift-E`
+### AI-Assisted Code Review
 
-The interactive mode provides a configuration interface for:
+The headless extractor generates C++ representations of decompiled binaries into the `extracted_code/` directory, organized by module. LLMs (Claude Code, Cursor, Codex) consume the `.cpp` files and `file_info.md` index to evaluate function logic, detect call patterns, and identify security-relevant invariants. For structured analysis workflows on top of this output, see the [AI Analysis Runtime](#ai-analysis-runtime) section.
 
-- **Output Management**: Specification of the SQLite database path and C++ output directory.
-- **Feature Selection**: Selection of analysis modules (Dangerous APIs, Strings, Loops, Stack Frames).
-- **PE Metadata Configuration**: Selection of PE extraction parameters (Metadata, Advanced PE, Runtime Info).
-- **Analysis Parameters**: Configuration of thunk resolution depth and confidence thresholds for call validation.
-- **Execution Monitoring**: A progress indicator displays the status of the analysis pipeline.
+### Interactive Analysis and Structured Export
 
-## Output Architecture
+The interactive plugin exports the current IDA database state, including renamed variables, custom comments, and manual type definitions from the `.idb`/`.i64`, into a SQLite database. Researchers can query the `functions`, `file_info`, and `function_xrefs` tables directly via SQL to analyze cross-references, data types, and metadata.
 
-The results are stored in a structured format designed for both human review and automated analysis. For comprehensive technical references, see:
+### Call Graph Traversal for Research Agents
 
-- [**Data Format Reference**](docs/data_format_reference.md) (Database & Heuristics)
-- [**Analysis Metadata and Reports Reference**](docs/file_info_format_reference.md) (Markdown & JSON Reports)
-- [**Function Index Format Reference**](docs/function_index_format_reference.md) (Function Lookup Index)
-- [**Module Profile Format Reference**](docs/module_profile_format_reference.md) (Module Fingerprint)
+Automated agents use the structured `inbound_xrefs`, `outbound_xrefs`, and the `function_xrefs` table to perform call graph traversal, evaluate reachability, resolve component dependencies, and generate technical summaries of subroutines based on their position in the global call graph.
 
-The results are stored in two primary relational tables within the SQLite database.
+## AI Analysis Runtime
 
-### Table: `file_info`
+The extraction output is designed to be consumed by [**DeepExtractRuntime**](https://github.com/marcosd4h/DeepExtractRuntime), a companion analysis runtime that operates on top of the SQLite databases and C++ files. The runtime deploys as an `.agent/` directory alongside the extraction data and operates across Claude Code, Cursor, Codex, and any AI coding environment that supports `AGENTS.md` or equivalent agent configuration.
 
-High-level metadata for the binary, including:
+The runtime provides:
 
-- `file_path`, `file_name`, `file_extension`, `file_size_bytes`.
-- `md5_hash`, `sha256_hash`.
-- `imports`, `exports`, `entry_point`.
-- `file_version`, `product_version`, `company_name`, `pdb_path`.
-- `rich_header`, `tls_callbacks`, `is_net_assembly`, `clr_metadata`.
-- `dll_characteristics`, `security_features`, `exception_info`.
+- **Slash commands** for interactive analysis: `/triage`, `/audit`, `/explain`, `/lift-class`, `/trace-export`, `/data-flow`, `/taint`, `/hunt`, `/state-machines`, `/full-report`
+- **Specialized agents** (code-lifter, re-analyst, triage-coordinator, type-reconstructor, verifier) that execute multi-step analysis pipelines
+- **Analysis skills** covering function classification, call graph tracing, taint analysis, COM/WRL interface reconstruction, attack surface mapping, type reconstruction, and decompiler verification
+- **Shared helper modules** providing database access, function resolution, API taxonomy (17 functional + 11 security categories), assembly metrics, struct scanning, caching, and cross-module graph analysis
+- **Lifecycle hooks** that inject module context at session start and support batch processing
 
-### Table: `functions`
+### Installing the Runtime
 
-The core table containing granular data for every function in the binary:
+The headless batch extractor writes two bootstrap files (`AGENTS.md` and `CLAUDE.md`) into the output directory. These files contain the full installation procedure and are recognized automatically by AI coding agents. To install the runtime:
 
-- `function_signature`, `mangled_name`, `function_name`.
-- `assembly_code`, `decompiled_code`.
-- `inbound_xrefs`, `outbound_xrefs` (Full & Simple JSON).
-- `vtable_contexts`, `global_var_accesses`, `dangerous_api_calls`.
-- `string_literals`, `stack_frame`, `loop_analysis`.
-- `analysis_errors`, `created_at`.
+1. **Open the extraction output directory** (the `StorageDir` you passed to `headless_batch_extractor.ps1`) as a project in **Claude Code** or **Cursor**.
+2. **Type `install DeepExtractRuntime`** in the agent chat.
 
-### Directory: `extracted_raw_code/` (Optional)
+The agent reads the bootstrap instructions from `AGENTS.md` / `CLAUDE.md` and executes the full setup automatically: cloning the [DeepExtractRuntime](https://github.com/marcosd4h/DeepExtractRuntime) repository into `.agent/`, creating the `.claude` symlink for Claude Code, installing the `.cursor/hooks.json` and `.cursor/rules` symlink for Cursor, and verifying the installation. No manual steps are required beyond the initial command.
 
-If `--generate-cpp` is used, the tool creates a folder structure with generated C++ files and per-module documentation:
+Once installed, the runtime's slash commands (`/triage`, `/audit`, `/explain`, etc.) and specialized agents become available in the agent session. To update to the latest runtime version, type `update DeepExtractRuntime`.
 
-- **Class methods:** Grouped by class into combined files of about **250–300 lines** each. Files are named `{module}_{class}_group_1.cpp`, `{module}_{class}_group_2.cpp`, etc. Methods are packed in alphabetical order; each method is preceded by a comment block with its name and signature.
-- **Standalone functions:** Grouped into combined files of about **250–300 lines** each to reduce file count. Files are named `{module}_standalone_group_1.cpp`, `{module}_standalone_group_2.cpp`, etc. Functions are packed in alphabetical order; each function in a grouped file is preceded by a comment block with its name and signature.
-- **`function_index.json`:** A lightweight index mapping every function name to its `.cpp` file and library tag (WIL, STL, WRL, CRT, ETW/TraceLogging, or `null` for application code). See the [Function Index Format Reference](docs/function_index_format_reference.md).
-- **`module_profile.json`:** A pre-computed module fingerprint summarising identity, scale, library composition, API surface (COM, RPC, WinRT, Named Pipes), complexity metrics, and security posture. Unlike other outputs, this file is generated **unconditionally** after function extraction -- it does not require `--generate-cpp`. See the [Module Profile Format Reference](docs/module_profile_format_reference.md).
-- **`file_info.md` / `file_info.json`:** Human-readable and machine-readable analysis reports. See the [Analysis Metadata and Reports Reference](docs/file_info_format_reference.md).
+See the [DeepExtractRuntime README](https://github.com/marcosd4h/DeepExtractRuntime) and [Onboarding Guide](https://github.com/marcosd4h/DeepExtractRuntime/blob/main/docs/ONBOARDING.md) for full documentation.
 
 ## Technical Requirements
 
 - **Operating System:** Windows 10/11
-- **IDA Pro:** Version 9.0 or later (Pro edition required for headless mode)
-- **Decompiler:** Hex-Rays Decompiler (optional, but required for C-code generation and advanced analysis)
+- **IDA Pro:** Version 9.x (Pro edition required for headless mode)
+- **Decompiler:** Hex-Rays Decompiler (optional; required for decompiled code output and C++ generation)
 - **Python:** Python 3 environment configured within IDA (built-in with IDA 9.x)
-- **Windows SDK Debugging Tools** (optional): Required for automatic symbol downloading (`symchk.exe`). Install from the [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/) -- select "Debugging Tools for Windows" during installation.
+- **Windows SDK Debugging Tools** (optional): Required for automatic symbol downloading (`symchk.exe`). Included with WinDbg and the [Windows SDK](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/); select "Debugging Tools for Windows" during SDK installation.
 - **Dependencies:**
-  - `pefile` (Bundled in `deps/`; used for PE header parsing)
+  - `pefile` (bundled in `deps/`; used for PE header parsing)
   - IDA Python SDK (built-in with IDA Pro)
+
+## Documentation
+
+Technical references for the extraction formats and database schemas:
+
+- [**Data Format Reference**](docs/data_format_reference.md): SQLite schema, data architecture, and analysis heuristics
+- [**Analysis Metadata and Reports Reference**](docs/file_info_format_reference.md): `file_info.md`, `file_info.json`, and C++ code output structure
+- [**Function Index Format Reference**](docs/function_index_format_reference.md): `function_index.json` format and library tagging
+- [**Module Profile Format Reference**](docs/module_profile_format_reference.md): `module_profile.json` computation covering identity, scale, library composition, API surface, complexity, and security posture
 
 ## Plugin Architecture
 
-DeepExtract conforms to the IDA 9.x plugin architecture for compatibility and maintainability:
+DeepExtract conforms to the IDA 9.x `plugmod_t` plugin architecture.
 
-**Entry Point:** `main.py` - IDA plugin entry point using `PLUGIN_ENTRY()`
+**Entry Point:** `main.py` (IDA plugin entry point via `PLUGIN_ENTRY()`)
 
 **Core Modules:**
 
 - `deep_extract/pe_context_extractor.py` - Main analysis pipeline and orchestration
-- `deep_extract/extractor_core.py` - Core extraction functions (xrefs, strings, stack frames)
+- `deep_extract/extractor_core.py` - Public API hub; re-exports from all analysis modules
+- `deep_extract/config.py` - Configuration dataclass and validation
+- `deep_extract/constants.py` - Analysis limits, function type classification, dangerous API matching
+- `deep_extract/schema.py` - SQLite schema management and migration
+- `deep_extract/db_connection.py` - SQLite connection management and PRAGMA configuration
+- `deep_extract/logging_utils.py` - Logging, memoization caching, and utility functions
+- `deep_extract/json_safety.py` - JSON serialization with truncation and size limits
+- `deep_extract/__init__.py` - Package init; re-exports public API from `extractor_core` and `pe_context_extractor`
+
+**Analysis Modules:**
+
 - `deep_extract/xref_analysis.py` - Cross-reference analysis and call graph building
-- `deep_extract/vtable_analysis.py` - C++ vtable reconstruction
-- `deep_extract/loop_analysis.py` - Control flow and loop detection (Tarjan's algorithm)
+- `deep_extract/vtable_analysis.py` - C++ vtable call resolution and method grouping (experimental)
+- `deep_extract/loop_analysis.py` - Control flow and loop detection (dominator-based, SCC fallback)
+- `deep_extract/indirect_call_analysis.py` - Indirect call resolution and jump table detection
+- `deep_extract/interprocedural_analysis.py` - Cross-function data flow analysis
+- `deep_extract/thunk_analysis.py` - Thunk chain resolution with configurable depth
+- `deep_extract/string_analysis.py` - String literal extraction per function
+- `deep_extract/stack_analysis.py` - Aggregate stack frame metrics and canary detection
+- `deep_extract/name_extraction.py` - Function name extraction and demangling
+- `deep_extract/import_resolution.py` - Import module resolution (IAT address to module name)
+- `deep_extract/validation.py` - Call validation with confidence scoring
 - `deep_extract/pe_metadata.py` - PE header, Rich header, TLS callback extraction
+
+**Output Generation:**
+
 - `deep_extract/cpp_generator.py` - C++ code generation for AI consumption
 - `deep_extract/module_profile.py` - Module fingerprint generation (`module_profile.json`)
-- `deep_extract/schema.py` - SQLite schema management and migration
-- `deep_extract/config.py` - Configuration dataclass and validation
+- `deep_extract/gui_dialog.py` - Interactive mode configuration dialog
+
+**Utilities:**
+
+- `deep_extract/utils/check_analyzed_files.py` - Batch analysis file-selection helper (hash, flags, stale lock checks)
 
 **Plugin Lifecycle:**
 
-- IDA loads `main.py` and calls `PLUGIN_ENTRY()`
-- Plugin factory (`DeepExtractPlugin`) initializes and creates module instance
-- Plugin module (`DeepExtractModule`) handles per-database execution
-- Detects headless vs. interactive mode based on command-line arguments
-- In headless mode: runs full pipeline and exits via `ida_pro.qexit()`
-- In interactive mode: displays the configuration interface for user selection.
+- IDA loads `main.py` and invokes `PLUGIN_ENTRY()`
+- Plugin factory (`DeepExtractPlugin`) initializes and creates a module instance
+- Plugin module (`DeepExtractModule`) executes per-database
+- Mode detection: presence of `--sqlite-db` in arguments selects headless mode; otherwise the GUI dialog is displayed
+- Headless mode: runs the full pipeline, then exits via `ida_pro.qexit()`
+- Interactive mode: displays the configuration dialog, then runs the pipeline with user-selected options
+- Script mode (`-S`): `main.py` detects script execution, creates `DeepExtractModule` directly, and runs the pipeline without `PLUGIN_ENTRY()`
 
 ## Plugin Distribution
 
-DeepExtract is packaged as an IDA 9.x plugin following Hex-Rays' HCLI plugin format:
+DeepExtract is packaged as an IDA 9.x plugin following the HCLI plugin format.
 
-**Package Contents:**
+**Package contents:**
 
 - `ida-plugin.json` - Plugin metadata and dependency specification
 - `main.py` - Plugin entry point
 - `deep_extract/` - Core analysis framework
 - `deps/` - Bundled dependencies (pefile)
-
-**Distribution Methods:**
-
-1. **Manual Installation**: Copy to IDA plugins directory
-2. **HCLI Package**: Distribute as ZIP with `ida-plugin.json` for automated installation
-3. **GitHub Release**: Publish tagged releases for version management
-
-**Compatibility:**
-
-- IDA Pro 9.0+
-- Windows
-- x86-64 architecture
 
 ---
 

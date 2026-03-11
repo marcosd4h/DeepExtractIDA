@@ -22,7 +22,7 @@ Output directory resolution:
 
 ### C++ File Naming
 
-When C++ generation is enabled, functions are grouped into combined files of about **250--300 lines** each to reduce file count:
+When C++ generation is enabled, functions are grouped into combined files of about **450--500 lines** each to reduce file count:
 
 - **Class methods:** Grouped by class into `{module_name}_{class}_group_1.cpp`, `{module_name}_{class}_group_2.cpp`, etc. Methods are packed in alphabetical order.
 - **Standalone functions:** Grouped into `{module_name}_standalone_group_1.cpp`, `{module_name}_standalone_group_2.cpp`, etc. Functions are packed in alphabetical order.

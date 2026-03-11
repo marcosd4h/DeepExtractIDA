@@ -56,7 +56,7 @@ DeepExtract - Analysis Configuration
 <Extract string literals:{chkStrings}>
 <Extract stack frame info:{chkStackFrame}>
 <Extract global variables:{chkGlobals}>
-<Analyze loops (Tarjan's algorithm):{chkLoops}>{cAnalysisGroup}>
+<Analyze loops:{chkLoops}>{cAnalysisGroup}>
 
 <##PE Metadata##Extract PE version info:{chkPeInfo}>
 <Extract PE metadata (imports/exports/sections):{chkPeMetadata}>

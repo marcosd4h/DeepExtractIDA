@@ -24,14 +24,14 @@ Output directory resolution:
 
 ## JSON Format (`function_index.json`)
 
-The index maps each function name to its generated `.cpp` file (when available), plus lightweight metadata (`function_id`, decompilation/assembly availability, and optional library tag).
+The index maps each function name to the generated `.cpp` file(s) containing it, plus lightweight metadata (`function_id`, decompilation/assembly availability, and optional library tag).
 
 ### JSON Schema
 
 ```json
 {
   "<function_name>": {
-    "file": "string | null",
+    "files": ["string", ...],
     "library": "WIL | STL | WRL | CRT | ETW/TraceLogging | null",
     "function_id": 123,
     "has_decompiled": true,
@@ -43,7 +43,7 @@ The index maps each function name to its generated `.cpp` file (when available),
 ### Field Details
 
 - **`function_name` (object key)**: The extracted function name, matching `functions.function_name` from the analysis database. This includes C++ class methods (`Class::Method`), thunks, and demangled names when available.
-- **`file`**: The generated `.cpp` filename containing the function. The file is located in the same directory as the index. This field is `null` when decompilation failed and no C++ output file exists.
+- **`files`**: List of generated `.cpp` filenames containing the function. Files are located in the same directory as the index. Most functions appear in a single file (one-element list). Functions with the same demangled name across different grouping boundaries appear in multiple files. The list is empty (`[]`) when decompilation failed and no C++ output file exists.
 - **`library`**: Optional tag for known library/runtime boilerplate. Values:
   - `WIL` — Windows Implementation Library (`wil::`, `wistd::`, or mangled `@wil@@`, `@wistd@@`)
   - `STL` — C++ standard library (`std::`, `stdext::`, or mangled `@std@@`, `@stdext@@`)
@@ -60,28 +60,39 @@ The index maps each function name to its generated `.cpp` file (when available),
 ```json
 {
   "IsFamilyProvisioned": {
-    "file": "appinfo_dll_standalone_group_50.cpp",
+    "files": ["appinfo_dll_standalone_group_50.cpp"],
     "library": null,
     "function_id": 861,
     "has_decompiled": true,
     "has_assembly": true
   },
   "CSyncMLDPU::AppendAlertStatus": {
-    "file": "coredpus_dll_CSyncMLDPU_group_1.cpp",
+    "files": ["coredpus_dll_CSyncMLDPU_group_1.cpp"],
     "library": null,
     "function_id": 1732,
     "has_decompiled": true,
     "has_assembly": true
   },
+  "ClientBase::CreateInstallRequest": {
+    "files": [
+      "AppXDeploymentClient_dll_Windows_group_32.cpp",
+      "AppXDeploymentClient_dll_Windows_group_33.cpp",
+      "AppXDeploymentClient_dll_Windows_group_34.cpp"
+    ],
+    "library": null,
+    "function_id": 4201,
+    "has_decompiled": true,
+    "has_assembly": true
+  },
   "wil::details_abi::ProcessLocalStorageData<...>::MakeAndInitialize": {
-    "file": "appinfo_dll_standalone_group_1.cpp",
+    "files": ["appinfo_dll_standalone_group_1.cpp"],
     "library": "WIL",
     "function_id": 37,
     "has_decompiled": true,
     "has_assembly": true
   },
   "SomeFailedFunc": {
-    "file": null,
+    "files": [],
     "library": null,
     "function_id": 42,
     "has_decompiled": false,
@@ -94,6 +105,6 @@ The index maps each function name to its generated `.cpp` file (when available),
 
 ## Notes
 
-- If a function name appears in multiple files, the **first occurrence** is retained in the index and later duplicates are ignored (a warning is logged). This keeps the index deterministic and compact.
-- Functions with failed or unavailable decompilation are still included with `"file": null` and `"has_decompiled": false` so agents can discover all database functions from the index alone.
+- When a function name appears in multiple generated files (due to duplicate demangled names across grouping boundaries), all files are recorded in the `"files"` list and a warning is logged.
+- Functions with failed or unavailable decompilation are still included with `"files": []` and `"has_decompiled": false` so agents can discover all database functions from the index alone.
 - Rich function-level metadata such as signatures and xref details remains in the SQLite database and `file_info.json`.

@@ -1,8 +1,8 @@
 """
 Loop detection utilities for PE binary analysis.
 
-This module uses Tarjan's strongly connected components (SCC) algorithm for
-O(V+E) loop detection and supports configurable limits with logging for large
+This module uses dominator-based back edge detection for natural loop discovery,
+with Tarjan's SCC as a fallback for irreducible control flow. Supports configurable limits with logging for large
 functions.
 """
 
@@ -26,8 +26,8 @@ def extract_loop_analysis(function_ea: int,
                          chunk_quantity: Optional[int] = None,
                          config: Optional[Any] = None) -> Dict[str, Any]:
     """
-    Analyzes the control flow graph of a function to identify all loops using
-    Tarjan's strongly connected components (SCC) algorithm for O(V+E) complexity.
+    Analyzes the control flow graph of a function to identify all loops.
+    Uses dominator-based back edge detection with SCC fallback for irreducible flow.
     
     Supports configurable limits and logging when large functions are skipped.
 

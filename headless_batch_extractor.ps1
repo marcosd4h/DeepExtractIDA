@@ -518,19 +518,16 @@ function Start-SymbolDownload {
             $stillRunning = [System.Collections.Generic.List[hashtable]]::new()
             foreach ($entry in $activeProcesses) {
                 if ($entry.Process.HasExited) {
-                    # Harvest result
                     $exitCode = $entry.Process.ExitCode
                     
-                    # Write log files from captured output
-                    try { $entry.StdoutBuilder.ToString() | Out-File -FilePath $entry.LogFile -Encoding UTF8 -Force } catch { }
-                    $stderrContent = $entry.StderrBuilder.ToString()
+                    # .Result blocks until ReadToEndAsync fully drains the closed stream — guaranteed complete
+                    $stdoutContent = $entry.StdoutTask.Result
+                    $stderrContent = $entry.StderrTask.Result
+                    try { $stdoutContent | Out-File -FilePath $entry.LogFile -Encoding UTF8 -Force } catch { }
                     if (-not [string]::IsNullOrWhiteSpace($stderrContent)) {
                         try { $stderrContent | Out-File -FilePath "$($entry.LogFile).err" -Encoding UTF8 -Force } catch { }
                     }
                     
-                    # Unregister events and dispose
-                    try { Unregister-Event -SourceIdentifier $entry.StdoutEvent.Name -ErrorAction SilentlyContinue } catch { }
-                    try { Unregister-Event -SourceIdentifier $entry.StderrEvent.Name -ErrorAction SilentlyContinue } catch { }
                     try { $entry.Process.Dispose() } catch { }
                     
                     if ($exitCode -eq 0) {
@@ -572,35 +569,19 @@ function Start-SymbolDownload {
             $proc = New-Object System.Diagnostics.Process
             $proc.StartInfo = $psi
             
-            # Capture stdout/stderr asynchronously to avoid deadlocks
-            $stdoutBuilder = New-Object System.Text.StringBuilder
-            $stderrBuilder = New-Object System.Text.StringBuilder
-            
-            $stdoutEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
-                if ($null -ne $EventArgs.Data) {
-                    $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null
-                }
-            } -MessageData $stdoutBuilder
-            
-            $stderrEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
-                if ($null -ne $EventArgs.Data) {
-                    $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null
-                }
-            } -MessageData $stderrBuilder
-            
             $proc.Start() | Out-Null
-            $proc.BeginOutputReadLine()
-            $proc.BeginErrorReadLine()
+            # ReadToEndAsync runs on the .NET ThreadPool — no shared PS event runspace,
+            # no race condition. .Result on harvest blocks until the stream is fully closed.
+            $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
+            $stderrTask = $proc.StandardError.ReadToEndAsync()
             
             $activeProcesses.Add(@{
-                    Process       = $proc
-                    FileName      = $fileName
-                    FilePath      = $filePath
-                    LogFile       = $logFile
-                    StdoutBuilder = $stdoutBuilder
-                    StderrBuilder = $stderrBuilder
-                    StdoutEvent   = $stdoutEvent
-                    StderrEvent   = $stderrEvent
+                    Process    = $proc
+                    FileName   = $fileName
+                    FilePath   = $filePath
+                    LogFile    = $logFile
+                    StdoutTask = $stdoutTask
+                    StderrTask = $stderrTask
                 })
             $totalStarted++
             
@@ -629,16 +610,14 @@ function Start-SymbolDownload {
         
         $exitCode = $entry.Process.ExitCode
         
-        # Write log files from captured output
-        try { $entry.StdoutBuilder.ToString() | Out-File -FilePath $entry.LogFile -Encoding UTF8 -Force } catch { }
-        $stderrContent = $entry.StderrBuilder.ToString()
+        # .Result blocks until ReadToEndAsync fully drains the closed stream — guaranteed complete
+        $stdoutContent = $entry.StdoutTask.Result
+        $stderrContent = $entry.StderrTask.Result
+        try { $stdoutContent | Out-File -FilePath $entry.LogFile -Encoding UTF8 -Force } catch { }
         if (-not [string]::IsNullOrWhiteSpace($stderrContent)) {
             try { $stderrContent | Out-File -FilePath "$($entry.LogFile).err" -Encoding UTF8 -Force } catch { }
         }
         
-        # Unregister events and dispose
-        try { Unregister-Event -SourceIdentifier $entry.StdoutEvent.Name -ErrorAction SilentlyContinue } catch { }
-        try { Unregister-Event -SourceIdentifier $entry.StderrEvent.Name -ErrorAction SilentlyContinue } catch { }
         try { $entry.Process.Dispose() } catch { }
         
         if ($exitCode -eq 0) {

@@ -212,7 +212,9 @@ class CppGenerator:
         cpp_files_generated += cpp_count
         for name, entry in standalone_index.items():
             if name in function_index:
-                # Ignore duplicate function names
+                for f in entry["files"]:
+                    if f not in function_index[name]["files"]:
+                        function_index[name]["files"].append(f)
                 continue
             function_index[name] = entry
 
@@ -464,16 +466,16 @@ class CppGenerator:
             if not function_name:
                 continue
             if function_name in function_index:
-                # Prefer the first occurrence for deterministic output
-                if function_index[function_name]["file"] != output_filename:
+                existing = function_index[function_name]
+                if output_filename not in existing["files"]:
                     debug_print(
-                        f"WARNING - Duplicate function name '{function_name}' found in "
-                        f"{function_index[function_name]['file']} and {output_filename}. "
-                        "Keeping the first occurrence."
+                        f"WARNING - Duplicate function name '{function_name}' found across "
+                        f"{existing['files']} and {output_filename}."
                     )
+                    existing["files"].append(output_filename)
                 continue
             function_index[function_name] = {
-                "file": output_filename,
+                "files": [output_filename],
                 "library": self._detect_library_tag(function_name, mangled_name),
                 "function_id": function_id,
                 "has_decompiled": True,
@@ -500,7 +502,7 @@ class CppGenerator:
             has_assembly = bool(func_row['assembly_code']) if 'assembly_code' in row_keys else False
 
             function_index[function_name] = {
-                "file": None,
+                "files": [],
                 "library": self._detect_library_tag(function_name, mangled_name),
                 "function_id": function_id,
                 "has_decompiled": False,
