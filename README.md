@@ -308,12 +308,6 @@ Requires `symchk.exe` from the [Windows SDK Debugging Tools](https://developer.m
 .\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Windows\System32" -StorageDir "C:\funvr\system32_internals"
 ```
 
-**Non-recursive scan (top-level only):**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Windows" -StorageDir "C:\funvr\windows_root_internals"
-```
-
 **Mixed recursive and non-recursive:**
 
 ```powershell
@@ -326,7 +320,7 @@ Requires `symchk.exe` from the [Windows SDK Debugging Tools](https://developer.m
 **File list mode:**
 
 ```powershell
-.\headless_batch_extractor.ps1 -FilesToAnalyze "targets.txt" -StorageDir "C:\funvr\vr_campaign1""
+.\headless_batch_extractor.ps1 -FilesToAnalyze "targets.txt" -StorageDir "C:\funvr\vr_campaign1"
 ```
 
 Where `targets.txt` contains:
@@ -344,95 +338,28 @@ C:\Program Files\MyApp\app.exe
 .\headless_batch_extractor.ps1 -TargetPid 1234,5678 -StorageDir "C:\Analysis"
 ```
 
-**Custom IDA path:**
+**Combined options:**
 
 ```powershell
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Malware" -StorageDir "C:\Analysis" -IdaPath "C:\IDA92\idat64.exe"
-```
-
-**Disable features for faster processing:**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -NoExtractStrings -NoGenerateCpp
-```
-
-**Adjust concurrency:**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
-```
-
-**Skip symbol downloading:**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Binaries" -StorageDir "C:\Analysis" -NoDownloadSymbols
-```
-
-**Custom symbol store path:**
-
-```powershell
-.\headless_batch_extractor.ps1 -ExtractDir "C:\Binaries" -StorageDir "C:\Analysis" -SymbolStorePath "D:\MySymbols"
+.\headless_batch_extractor.ps1 `
+    -ExtractDirRecursive "C:\Binaries" `
+    -StorageDir "C:\Analysis" `
+    -IdaPath "C:\IDA92\idat64.exe" `
+    -MaxConcurrentProcesses 8 `
+    -NoGenerateCpp -NoDownloadSymbols
 ```
 
 #### Full Windows Codebase Extraction
 
-These examples target key OS directories to extract and decompile the Windows usermode codebase into SQLite databases and C++ source files.
-
-**Core OS libraries:**
+Extracts and decompiles the Windows usermode codebase into SQLite databases and C++ source files. Covers `System32` (core libraries and kernel drivers), `SystemApps` and `ImmersiveControlPanel` (UWP/packaged apps), `Program Files` and `Program Files (x86)` (installed applications and shared frameworks), and `IME` (input method components) recursively, plus top-level PE files under `C:\Windows` (e.g., `explorer.exe`, `regedit.exe`).
 
 ```powershell
 .\headless_batch_extractor.ps1 `
-    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
+    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files','C:\Program Files (x86)','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
     -ExtractDir 'C:\Windows' `
     -StorageDir "F:\Analysis\win11_full" `
     -MaxConcurrentProcesses 8
 ```
-
-Covers `System32` (core libraries), `SystemApps` and `ImmersiveControlPanel` (UWP/packaged apps), `Common Files` (shared frameworks), and `IME` (input method components) recursively, plus top-level PE files under `C:\Windows` (e.g., `explorer.exe`, `regedit.exe`).
-
-**Extended with SysWOW64 and kernel drivers:**
-
-```powershell
-.\headless_batch_extractor.ps1 `
-    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SysWOW64','C:\Windows\System32\drivers','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
-    -ExtractDir 'C:\Windows' `
-    -StorageDir "F:\Analysis\win11_full_extended" `
-    -MaxConcurrentProcesses 8
-```
-
-Adds 32-bit system libraries (`SysWOW64`) and kernel-mode drivers (`.sys` files under `drivers`).
-
-**Maximum coverage (all installed applications):**
-
-```powershell
-.\headless_batch_extractor.ps1 `
-    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SysWOW64','C:\Windows\System32\drivers','C:\Windows\SystemApps','C:\Program Files','C:\Program Files (x86)','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
-    -ExtractDir 'C:\Windows' `
-    -StorageDir "F:\Analysis\win11_everything" `
-    -MaxConcurrentProcesses 8
-```
-
-**Two-pass extraction (DB first, C++ second):**
-
-```powershell
-# Pass 1: DB-only extraction (skip C++ generation)
-.\headless_batch_extractor.ps1 `
-    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
-    -ExtractDir 'C:\Windows' `
-    -StorageDir "F:\Analysis\win11_full" `
-    -NoGenerateCpp `
-    -MaxConcurrentProcesses 8
-
-# Pass 2: re-run with C++ generation on the same StorageDir
-.\headless_batch_extractor.ps1 `
-    -ExtractDirRecursive 'C:\Windows\System32','C:\Windows\SystemApps','C:\Program Files\Common Files','C:\Windows\IME','C:\Windows\ImmersiveControlPanel' `
-    -ExtractDir 'C:\Windows' `
-    -StorageDir "F:\Analysis\win11_full" `
-    -ForceReanalyze `
-    -MaxConcurrentProcesses 8
-```
-
-The first pass builds SQLite databases without C++ overhead. The second pass re-analyzes with full C++ generation. This is useful when queryable databases are needed as quickly as possible.
 
 #### Getting Help
 
@@ -513,7 +440,7 @@ The headless batch extractor writes two bootstrap files (`AGENTS.md` and `CLAUDE
 1. **Open the extraction output directory** (the `StorageDir` you passed to `headless_batch_extractor.ps1`) as a project in **Claude Code** or **Cursor**.
 2. **Type `install DeepExtractRuntime`** in the agent chat.
 
-The agent reads the bootstrap instructions from `AGENTS.md` / `CLAUDE.md` and executes the full setup automatically: cloning the [DeepExtractRuntime](https://github.com/marcosd4h/DeepExtractRuntime) repository into `.agent/`, creating the `.claude` symlink for Claude Code, installing the `.cursor/hooks.json` and `.cursor/rules` symlink for Cursor, and verifying the installation. No manual steps are required beyond the initial command.
+The agent reads the bootstrap instructions from `AGENTS.md` / `CLAUDE.md` and executes the full setup automatically: cloning the [DeepExtractRuntime](https://github.com/marcosd4h/DeepExtractRuntime) repository into `.agent/`, creating the `.claude` symlink for Claude Code, copying `.cursor/hooks.json` and `.cursor/rules/*.mdc` rule files for Cursor, and verifying the installation. No manual steps are required beyond the initial command.
 
 Once installed, the runtime's slash commands (`/triage`, `/audit`, `/explain`, etc.) and specialized agents become available in the agent session. To update to the latest runtime version, type `update DeepExtractRuntime`.
 

@@ -1592,30 +1592,34 @@ cmd //c "mklink /D .claude .agent"
 
 Cursor discovers project hooks from `.cursor/hooks.json` and project rules
 from `.cursor/rules/`. Create the `.cursor` directory, copy the hooks
-configuration, and symlink the rules directory.
+configuration, and copy the rules. Rules must use the `.mdc` extension for
+Cursor to process their YAML frontmatter (`alwaysApply`, `description`,
+`globs`); the canonical `.md` sources in `.agent/rules/` are renamed during
+the copy.
 
-**Windows (cmd -- requires Developer Mode or elevated prompt):**
+**Windows (cmd):**
 
 ```cmd
 if not exist .cursor mkdir .cursor
 copy /Y .agent\hooks.json .cursor\hooks.json
-if not exist .cursor\rules mklink /D .cursor\rules ..\.agent\rules
+if not exist .cursor\rules mkdir .cursor\rules
+for %%f in (.agent\rules\*.md) do copy /Y "%%f" ".cursor\rules\%%~nf.mdc"
 ```
 
-**Windows (bash / Git Bash -- requires Developer Mode or elevated prompt):**
+**Windows (bash / Git Bash):**
 
 ```bash
-mkdir -p .cursor
+mkdir -p .cursor .cursor/rules
 cp .agent/hooks.json .cursor/hooks.json
-[ ! -L .cursor/rules ] && cmd //c "mklink /D .cursor\rules ..\.agent\rules"
+for f in .agent/rules/*.md; do cp "$f" ".cursor/rules/$(basename "$f" .md).mdc"; done
 ```
 
 **bash (macOS / Linux):**
 
 ```bash
-mkdir -p .cursor
+mkdir -p .cursor .cursor/rules
 cp .agent/hooks.json .cursor/hooks.json
-[ ! -L .cursor/rules ] && ln -s ../.agent/rules .cursor/rules
+for f in .agent/rules/*.md; do cp "$f" ".cursor/rules/$(basename "$f" .md).mdc"; done
 ```
 
 ### Step 4 -- Verify
@@ -1626,7 +1630,7 @@ ALL of the following MUST be true before you proceed:
 - `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
 - `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, `.agent/helpers/`, `.agent/hooks/`, and `.agent/config/` directories exist.
 - `.cursor/hooks.json` exists and is readable.
-- `.cursor/rules` is a symlink (or junction on Windows) pointing to `.agent/rules`.
+- `.cursor/rules/` is a directory containing `.mdc` copies of every `.agent/rules/*.md` file.
 
 If any check fails, remove the partial installation and re-run from Step 1:
 
@@ -1661,11 +1665,11 @@ cd .agent && git stash && git pull && git stash pop
 If the stash pop produces conflicts, inform the user and show which files
 conflict so they can resolve manually.
 
-After a successful pull, re-copy hooks for Cursor (the rules symlink stays
-in sync automatically):
+After a successful pull, re-copy hooks and rules for Cursor:
 
 ```bash
 cp .agent/hooks.json .cursor/hooks.json
+for f in .agent/rules/*.md; do cp "$f" ".cursor/rules/$(basename "$f" .md).mdc"; done
 ```
 
 ### Step 2 -- Verify
@@ -1676,7 +1680,7 @@ Re-run the same verification from the bootstrap section:
 - `.claude` is a symlink (or junction on Windows) pointing to `.agent`.
 - `.agent/skills/`, `.agent/commands/`, `.agent/agents/`, `.agent/helpers/`, `.agent/hooks/`, and `.agent/config/` directories exist.
 - `.cursor/hooks.json` exists and is readable.
-- `.cursor/rules` is a symlink (or junction on Windows) pointing to `.agent/rules`.
+- `.cursor/rules/` is a directory containing `.mdc` copies of every `.agent/rules/*.md` file.
 
 ### Step 3 -- Report
 
@@ -1708,6 +1712,29 @@ that file as if it appeared here.
 
 **Do not duplicate or summarize those instructions here.** Always defer to
 `.agent/AGENTS.md` for the complete and up-to-date reference.
+
+---
+
+## Project Rules
+
+Project rules live in `.agent/rules/` as `.md` files with optional YAML
+frontmatter. They encode workspace conventions (error handling, JSON output,
+script invocation, caching, etc.) that all AI coding agents should follow.
+
+**Cursor** requires rules in `.cursor/rules/` with the `.mdc` extension for
+frontmatter processing (`alwaysApply`, `description`, `globs`). The bootstrap
+copies each `.agent/rules/*.md` file to `.cursor/rules/*.mdc`. After adding
+or editing rules in `.agent/rules/`, re-run the copy step from Step 3 or
+the Runtime Update procedure to sync.
+
+**Claude Code** reads rules from `.claude/rules/` (a symlink chain:
+`.claude` -> `.agent`, so `.claude/rules/` resolves to `.agent/rules/`).
+Claude Code handles `.md` files with frontmatter natively.
+
+**Other environments** (OpenAI Codex, custom agents, or any tool that does
+not read `.cursor/rules/` or `.claude/rules/`): read project rules directly
+from `.agent/rules/`. Each `.md` file is self-contained and can be loaded
+as additional context or appended to the agent's system prompt.
 
 ---
 
