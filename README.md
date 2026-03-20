@@ -6,6 +6,8 @@
 
 Results are written to a per-binary SQLite database, generated as C++ source files organized by module, and accompanied by JSON metadata. DeepExtract operates in two modes: **headless** for automated batch processing of large binary datasets, and **interactive** for targeted single-binary analysis within the IDA GUI.
 
+For a deep dive into the motivation and design journey behind DeepExtract, from the initial experiments with raw decompiled C++ dumps through the challenges of making agents reason over disconnected binary data, to the structured extraction pipeline and agent runtime architecture, read the full writeup: **[Making Compiled Binaries Accessible to AI Coding Agents](https://marcosd4h.github.io/deepextract-overview/)**. The post covers why traditional agent code-navigation tools break on decompiler output, what led to the SQLite-backed structured approach, and how the [DeepExtractRuntime](https://github.com/marcosd4h/DeepExtractRuntime) extends coding agents with vulnerability research capabilities.
+
 ## How It Works
 
 The extraction pipeline has three stages:
