@@ -95,7 +95,8 @@ jobs:
             ida-plugin.json \
             main.py \
             deep_extract \
-            images
+            images \
+            README.md
 
           echo "Created archive: DeepExtractIDA.zip"
 
