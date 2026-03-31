@@ -278,6 +278,7 @@ class DeepExtractModule(ida_idaapi.plugmod_t):
             debug_print(f"  Advanced PE: {config.extract_advanced_pe}")
             debug_print(f"  Runtime Info: {config.extract_runtime_info}")
             debug_print(f"  Generate C++: {config.generate_cpp}")
+            debug_print(f"  Generate ASM: {config.generate_asm}")
             debug_print(f"  Thunk Depth: {config.thunk_depth}")
             debug_print(f"  Min Confidence: {config.min_conf}")
             debug_print("=" * 80)

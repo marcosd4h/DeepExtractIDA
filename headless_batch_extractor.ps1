@@ -127,6 +127,7 @@ param(
     [Parameter(HelpMessage = "Skip runtime information extraction")] [switch]$NoRuntimeInfo,
     [Parameter(HelpMessage = "Force re-analysis of previously analyzed files")] [switch]$ForceReanalyze,
     [Parameter(HelpMessage = "Skip C++ file generation from decompiled code")] [switch]$NoGenerateCpp,
+    [Parameter(HelpMessage = "Enable assembly (.asm) file generation (disabled by default)")] [switch]$GenerateAsm,
 
     # Symbol Download Options
     [Parameter(HelpMessage = "Skip automatic symbol (PDB) downloading before analysis (enabled by default)")]
@@ -196,6 +197,7 @@ function Show-Help {
     Write-Host "  -NoRuntimeInfo          Skip .NET/delay-load analysis"
     Write-Host "  -ForceReanalyze         Force re-analysis of all files"
     Write-Host "  -NoGenerateCpp          Skip C++ code generation"
+    Write-Host "  -GenerateAsm            Enable assembly (.asm) file generation"
     Write-Host ""
     Write-Host "SYMBOL DOWNLOAD OPTIONS:" -ForegroundColor Yellow
     Write-Host "  Symbols (PDBs) are automatically downloaded before analysis using symchk.exe."
@@ -1253,6 +1255,11 @@ function Start-IDAProcesses {
                 # Use backslash-escaped quotes for the path (survives IDA's command parsing)
                 $idaScriptArgs.Add('\"' + $extractedCodeDir + '\"')
             }
+            if ($analysisFlags.generate_asm) {
+                $idaScriptArgs.Add("--generate-asm")
+                $idaScriptArgs.Add("--asm-output-dir")
+                $idaScriptArgs.Add('\"' + $extractedCodeDir + '\"')
+            }
             
             # Use full path to main.py (already validated at script startup)
             $mainPyPath = Join-Path $PSScriptRoot "main.py"
@@ -2076,6 +2083,7 @@ $analysisFlags = @{
     extract_runtime_info   = -not $NoRuntimeInfo.IsPresent
     force_reanalyze        = $ForceReanalyze.IsPresent
     generate_cpp           = -not $NoGenerateCpp.IsPresent
+    generate_asm           = $GenerateAsm.IsPresent
 }
 
 # Determine which files to analyze based on the parameter set used

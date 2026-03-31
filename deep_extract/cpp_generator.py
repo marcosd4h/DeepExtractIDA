@@ -15,6 +15,7 @@ from typing import List, Set, Tuple, Optional, Any
 # Use consistent logging approach across modules
 from .logging_utils import debug_print
 from .db_connection import connect_sqlite as _connect_sqlite
+from . import constants
 
 
 class CppGenerator:
@@ -165,7 +166,7 @@ class CppGenerator:
                 missing_signature_count += 1
             
             # Skip functions where decompilation failed
-            if decompiled_code.startswith("Decompilation failed:") or decompiled_code == "Decompiler not available":
+            if constants.is_decompilation_failure(decompiled_code):
                 debug_print(f"TRACE - Skipping function '{original_name}': {decompiled_code}")
                 continue
             
@@ -253,9 +254,8 @@ class CppGenerator:
             decompiled_code = func_row['decompiled_code']
             
             # Only include functions that have valid decompiled code (same filter as C++ generation)
-            if (original_name and decompiled_code and 
-                not decompiled_code.startswith("Decompilation failed:") and 
-                decompiled_code != "Decompiler not available"):
+            if (original_name and decompiled_code and
+                    not constants.is_decompilation_failure(decompiled_code)):
                 function_names.append(original_name)
         
         # Generate markdown documentation
@@ -1213,12 +1213,10 @@ def generate_standalone_markdown_documentation(db_path: str, output_dir: str, mo
             cursor = conn.cursor()
             
             # Get all functions with valid decompiled code
-            cursor.execute('''
+            cursor.execute(f'''
                 SELECT function_name, function_signature, decompiled_code
                 FROM functions
-                WHERE decompiled_code IS NOT NULL 
-                AND decompiled_code != 'Decompiler not available'
-                AND decompiled_code NOT LIKE 'Decompilation failed:%'
+                WHERE {constants.DECOMPILATION_FAILURE_SQL_FILTER}
                 ORDER BY function_name
             ''')
             

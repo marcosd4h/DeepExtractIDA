@@ -122,6 +122,13 @@ from .constants import (
     SUSPICIOUS_CALL_DISTANCE,
     LOW_ADDRESS_THRESHOLD,
     
+    # Decompilation failure detection
+    DECOMPILATION_FAILURE_EXACT,
+    DECOMPILATION_FAILURE_PREFIX,
+    DECOMPILATION_FAILURE_SQL_FILTER,
+    DECOMPILATION_FAILURE_SQL_MATCH,
+    is_decompilation_failure,
+
     # API resolution
     resolve_apiset,
     is_dangerous_api,
@@ -136,6 +143,9 @@ from .cpp_generator import (
     generate_standalone_markdown_documentation,
     generate_extraction_documentation,
 )
+
+# ASM generation
+from .asm_generator import AsmGenerator
 
 # Module profile generation
 from .module_profile import (
@@ -247,6 +257,11 @@ __all__ = [
     'MAX_VTABLE_OFFSET',
     'SUSPICIOUS_CALL_DISTANCE',
     'LOW_ADDRESS_THRESHOLD',
+    'DECOMPILATION_FAILURE_EXACT',
+    'DECOMPILATION_FAILURE_PREFIX',
+    'DECOMPILATION_FAILURE_SQL_FILTER',
+    'DECOMPILATION_FAILURE_SQL_MATCH',
+    'is_decompilation_failure',
     'resolve_apiset',
     'is_dangerous_api',
     'CRYPTO_CONSTANTS',
@@ -255,6 +270,9 @@ __all__ = [
     'CppGenerator',
     'generate_standalone_markdown_documentation',
     'generate_extraction_documentation',
+    
+    # ASM generation
+    'AsmGenerator',
     
     # Module profile generation
     'generate_module_profile',

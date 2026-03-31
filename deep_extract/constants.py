@@ -56,6 +56,45 @@ DECOMPILATION_TIMEOUT_WARNING = 30.0  # Seconds after which decompilation is con
 DECOMPILATION_TIMEOUT = 600           # Hard timeout (seconds) per function, decompilation is skipped if exceeded
 DECOMPILATION_MIN_OUTPUT_LENGTH = 10  # Minimum length for valid decompiled output
 
+# Decompilation Failure Sentinel Strings
+# These are stored in the DB when Hex-Rays fails for various reasons.
+# Used to filter functions from C++/ASM output and to compute accurate stats.
+DECOMPILATION_FAILURE_EXACT = frozenset({
+    "Decompiler not available",
+    "Decompiler returned None",
+    "Decompilation produced empty output",
+    "Decompilation timed out",
+})
+DECOMPILATION_FAILURE_PREFIX = "Decompilation failed:"
+
+
+def is_decompilation_failure(code: str) -> bool:
+    """Return True if *code* is a sentinel placeholder rather than real pseudocode."""
+    if not code:
+        return True
+    return code in DECOMPILATION_FAILURE_EXACT or code.startswith(DECOMPILATION_FAILURE_PREFIX)
+
+
+# SQL WHERE clause fragment that excludes all decompilation failure sentinels.
+# Intended for embedding in raw SQL queries where the Python helper cannot be used.
+DECOMPILATION_FAILURE_SQL_FILTER = (
+    "decompiled_code IS NOT NULL "
+    "AND decompiled_code != 'Decompiler not available' "
+    "AND decompiled_code != 'Decompiler returned None' "
+    "AND decompiled_code != 'Decompilation produced empty output' "
+    "AND decompiled_code != 'Decompilation timed out' "
+    "AND decompiled_code NOT LIKE 'Decompilation failed:%'"
+)
+
+DECOMPILATION_FAILURE_SQL_MATCH = (
+    "decompiled_code IS NULL "
+    "OR decompiled_code = 'Decompiler not available' "
+    "OR decompiled_code = 'Decompiler returned None' "
+    "OR decompiled_code = 'Decompilation produced empty output' "
+    "OR decompiled_code = 'Decompilation timed out' "
+    "OR decompiled_code LIKE 'Decompilation failed:%'"
+)
+
 # Per-module decompilation blacklist.
 # Keys are lowercase module filenames (e.g. "appxdeploymentclient.dll").
 # Values are sets of function name substrings -- if any substring matches

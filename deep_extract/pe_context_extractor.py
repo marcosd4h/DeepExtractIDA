@@ -29,6 +29,7 @@ import idc
 try:
     from . import constants
     from . import cpp_generator
+    from . import asm_generator as _asm_generator_mod
     from . import extractor_core
     from . import json_safety
     from . import module_profile as _module_profile
@@ -50,6 +51,7 @@ except ImportError:
     
     from extraction_tool import constants
     from extraction_tool import cpp_generator
+    from extraction_tool import asm_generator as _asm_generator_mod
     from extraction_tool import extractor_core
     from extraction_tool import json_safety
     from extraction_tool import module_profile as _module_profile
@@ -769,6 +771,8 @@ def parse_arguments() -> Optional[dict]:
     parser.add_argument("--force-reanalyze", action="store_true", default=False)
     parser.add_argument("--generate-cpp", action="store_true", default=False)
     parser.add_argument("--cpp-output-dir", type=str, default=None, help="Directory for C++ output files (defaults to extracted_raw_code/ next to db)")
+    parser.add_argument("--generate-asm", action="store_true", default=False)
+    parser.add_argument("--asm-output-dir", type=str, default=None, help="Directory for ASM output files (defaults to same as cpp-output-dir or extracted_raw_code/ next to db)")
     parser.add_argument("--thunk-depth", type=int, default=None)
     parser.add_argument("--min-call-conf", type=float, default=None)
 
@@ -1759,27 +1763,21 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
             _CPP_COLS = ('function_id', 'function_name', 'function_signature',
                          'function_signature_extended', 'mangled_name',
                          'assembly_code', 'decompiled_code')
-            cursor.execute('''
+            cursor.execute(f'''
                 SELECT function_id, function_name, function_signature,
                        function_signature_extended, mangled_name, assembly_code,
                        decompiled_code
                 FROM functions
-                WHERE decompiled_code IS NOT NULL 
-                AND decompiled_code != 'Decompiler not available'
-                AND decompiled_code NOT LIKE 'Decompilation failed:%'
+                WHERE {constants.DECOMPILATION_FAILURE_SQL_FILTER}
             ''')
             functions_for_cpp = [dict(zip(_CPP_COLS, row)) for row in cursor]
 
             _FAIL_COLS = ('function_id', 'function_name', 'mangled_name', 'assembly_code')
-            cursor.execute('''
+            cursor.execute(f'''
                 SELECT function_id, function_name, mangled_name, assembly_code
                 FROM functions
                 WHERE function_name IS NOT NULL
-                AND (
-                    decompiled_code IS NULL
-                    OR decompiled_code = 'Decompiler not available'
-                    OR decompiled_code LIKE 'Decompilation failed:%'
-                )
+                AND ({constants.DECOMPILATION_FAILURE_SQL_MATCH})
             ''')
             failed_functions_for_index = [dict(zip(_FAIL_COLS, row)) for row in cursor]
 
@@ -1793,6 +1791,76 @@ def generate_output_files(config: AnalysisConfig, sqlite_db_path: str) -> Tuple[
     except Exception as e:
         extractor_core.debug_print(f"ERROR - Failed to generate C++ files: {str(e)}")
         return (0, 0, 0)
+
+
+def generate_asm_output_files(config: AnalysisConfig, sqlite_db_path: str) -> int:
+    """Generate .asm files from function assembly stored in the database.
+
+    Returns the number of .asm files generated.
+    """
+    if not config.generate_asm:
+        return 0
+
+    try:
+        name_without_ext = config.input_file_path.stem
+        extension = config.input_file_path.suffix.lstrip('.')
+
+        if extension:
+            module_name = cpp_generator.CppGenerator.sanitize_filename(f"{name_without_ext}_{extension}")
+        else:
+            module_name = cpp_generator.CppGenerator.sanitize_filename(name_without_ext)
+
+        if config.asm_output_dir:
+            extracted_code_dir = config.asm_output_dir
+        elif config.cpp_output_dir:
+            extracted_code_dir = config.cpp_output_dir
+        else:
+            db_dir = config.sqlite_db_path.parent
+            extracted_code_dir = db_dir / "extracted_raw_code"
+        module_dir = extracted_code_dir / module_name
+
+        generator = _asm_generator_mod.AsmGenerator(
+            output_dir=pathlib.Path(module_dir),
+            module_name=module_name,
+        )
+
+        with get_db_connection(sqlite_db_path, pragmas=config.get_sqlite_pragmas()) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+
+            _ASM_COLS = (
+                'function_id', 'function_name', 'function_signature',
+                'function_signature_extended', 'mangled_name',
+                'assembly_code', 'simple_inbound_xrefs', 'simple_outbound_xrefs',
+                'string_literals', 'dangerous_api_calls',
+            )
+            cursor.execute('''
+                SELECT function_id, function_name, function_signature,
+                       function_signature_extended, mangled_name,
+                       assembly_code, simple_inbound_xrefs, simple_outbound_xrefs,
+                       string_literals, dangerous_api_calls
+                FROM functions
+                WHERE assembly_code IS NOT NULL AND assembly_code != ''
+                ORDER BY function_id
+            ''')
+            all_functions = [dict(zip(_ASM_COLS, row)) for row in cursor]
+
+        if not all_functions:
+            debug_print("No functions with assembly found for ASM generation.")
+            return 0
+
+        debug_print(f"Generating ASM files for {len(all_functions)} functions...")
+        asm_count, asm_index = generator.generate_asm_files(all_functions)
+
+        if asm_index:
+            generator.merge_into_function_index(asm_index)
+
+        return asm_count
+
+    except Exception as e:
+        extractor_core.debug_print(f"ERROR - Failed to generate ASM files: {str(e)}")
+        return 0
+
 
 def check_dependencies() -> Dict[str, Any]:
     """Checks availability of optional dependencies."""
@@ -2005,7 +2073,13 @@ def run_analysis_pipeline(config: AnalysisConfig) -> int:
             if cpp_result:
                 timer.cpp_files_generated = cpp_result[0]  # cpp_files_generated count
             timer.end_phase("cpp_generation", f"C++ generation complete ({timer.cpp_files_generated:,} files)")
-            
+
+        # ASM Output Generation
+        if config.generate_asm:
+            timer.start_phase("asm_generation")
+            asm_count = generate_asm_output_files(config, str(config.sqlite_db_path))
+            timer.end_phase("asm_generation", f"ASM generation complete ({asm_count:,} files)")
+
         # DB Update
         timer.start_phase("database_finalization")
         pe_data = {

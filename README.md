@@ -4,7 +4,7 @@
 
 **DeepExtract** is an IDA Pro 9.x plugin that bridges the gap between compiled PE binaries and AI coding agents. It extracts the full structural context of a binary (PE metadata, function signatures, disassembly, decompiled C/C++ code, cross-references, control flow, and more), and writes it in formats that agents like **Claude Code**, **Codex**, and **Cursor** can directly ingest and reason over. The goal is to let these agents read, navigate, and understand PE files the same way they understand source code repositories, enabling **AI-assisted vulnerability research** and **reverse engineering** at scale.
 
-Results are written to a per-binary SQLite database, generated as C++ source files organized by module, and accompanied by JSON metadata. DeepExtract operates in two modes: **headless** for automated batch processing of large binary datasets, and **interactive** for targeted single-binary analysis within the IDA GUI.
+Results are written to a per-binary SQLite database, generated as C++ source files organized by module, and optionally as assembly (`.asm`) files, with rich per-function metadata headers designed for AI agent consumption. DeepExtract operates in two modes: **headless** for automated batch processing of large binary datasets, and **interactive** for targeted single-binary analysis within the IDA GUI.
 
 For a deep dive into the motivation and design journey behind DeepExtract, from the initial experiments with raw decompiled C++ dumps through the challenges of making agents reason over disconnected binary data, to the structured extraction pipeline and agent runtime architecture, read the full writeup: **[Making Compiled Binaries Accessible to AI Coding Agents](https://marcosd4h.github.io/deepextract-overview/)**. The post covers why traditional agent code-navigation tools break on decompiler output, what led to the SQLite-backed structured approach, and how the [DeepExtractRuntime](https://github.com/marcosd4h/DeepExtractRuntime) extends coding agents with vulnerability research capabilities.
 
@@ -22,7 +22,8 @@ PE Binary (.exe/.dll/.sys)
         v
   Structured Output:
     - SQLite database (per-binary)
-    - C++ source files (optional)
+    - C++ source files (optional, --generate-cpp)
+    - Assembly files with AI metadata headers (optional, --generate-asm)
     - JSON metadata (module_profile, function_index, file_info)
 ```
 
@@ -37,7 +38,7 @@ PE Binary (.exe/.dll/.sys)
 
 At the file level, it extracts PE headers, imports, exports, sections, security features, Rich header data, TLS callbacks, and .NET CLR metadata.
 
-**Stage 3 - Output.** All extracted data is written to a SQLite database. When C++ generation is enabled, the plugin groups decompiled functions into source files organized by class and module, and generates JSON metadata files (`function_index.json`, `module_profile.json`, `file_info.json`) alongside a human-readable report (`file_info.md`).
+**Stage 3 - Output.** All extracted data is written to a SQLite database. When C++ generation is enabled (`--generate-cpp`), the plugin groups decompiled functions into source files organized by class and module, and generates JSON metadata files (`function_index.json`, `module_profile.json`, `file_info.json`) alongside a human-readable report (`file_info.md`). When assembly generation is enabled (`--generate-asm`), the plugin writes `.asm` files containing raw disassembly grouped by class membership and address order, with structured per-function headers (callers, callees, strings, dangerous APIs) for AI agent analysis. Library/CRT functions are separated into dedicated files. Assembly output is independent of decompiler availability.
 
 ## Key Concepts
 
@@ -146,6 +147,32 @@ When `--generate-cpp` is enabled, the plugin writes decompiled functions as grou
 - **`module_profile.json`:** Pre-computed module fingerprint covering identity, scale, library composition, API surface, complexity metrics, and security posture. See the [Module Profile Format Reference](docs/module_profile_format_reference.md).
 - **`file_info.md` / `file_info.json`:** Human-readable and machine-readable analysis reports. See the [Analysis Metadata and Reports Reference](docs/file_info_format_reference.md).
 
+Only functions with real Hex-Rays pseudocode are included in C++ output. Functions where decompilation failed (license unavailable, timeout, empty output, or decompiler returned `None`) are excluded from `.cpp` files and correctly reported as failed in `module_profile.json` and `function_index.json`.
+
+### Assembly Output (Optional)
+
+When `--generate-asm` is enabled, the plugin writes raw disassembly into grouped `.asm` files. This output is independent of the Hex-Rays decompiler; it works with any IDA license that supports disassembly. Assembly files are written alongside C++ files in the same `extracted_code/<module>/` directory by default, or to a custom directory via `--asm-output-dir`.
+
+- **Class methods:** Grouped by class name (sorted by address within each class), named `{module}_{class}_group_N.asm`.
+- **Standalone functions:** Sorted by address order and split at approximately 2000-2500 lines per file, named `{module}_standalone_group_N.asm`.
+- **Library/CRT functions:** Separated into dedicated `{module}_library.asm` file(s) to avoid polluting application code analysis.
+
+Each function is preceded by a structured metadata header:
+
+```asm
+; ============================================================
+; Function: sub_401000
+; Address: 0x401000
+; Signature: int __cdecl sub_401000(int a1, int a2)
+; Callers: WinMain (id:1), sub_402300 (id:45)
+; Callees: WSAStartup [WS2_32.dll], socket [WS2_32.dll], sub_4015A0 (id:12)
+; Strings: "Failed to connect", "192.168.1.1"
+; Dangerous APIs: connect, WSAStartup
+; ============================================================
+```
+
+The headers include cross-references (callers/callees with module attribution), string literals, dangerous API calls, and library tags, enabling AI agents to navigate the assembly without needing to query the database. When both C++ and ASM generation are enabled, `function_index.json` is updated with `asm_files` entries alongside the existing `files` (C++) entries.
+
 ## Usage Guide
 
 ### Installation
@@ -215,7 +242,7 @@ The script supports three input modes, which can be combined in a single invocat
 - **File list:** `-FilesToAnalyze` accepts a text file with one path per line.
 - **PID mode:** `-TargetPid` extracts all modules loaded by one or more running processes (comma-separated PIDs).
 
-Files from all sources are merged into one batch and deduplicated. C++ code generation is enabled by default in batch mode; disable with `-NoGenerateCpp`.
+Files from all sources are merged into one batch and deduplicated. C++ code generation is enabled by default in batch mode; disable with `-NoGenerateCpp`. Assembly generation is disabled by default; enable with `-GenerateAsm`.
 
 Additional batch parameters:
 
@@ -243,6 +270,9 @@ Additional batch parameters:
 │      ├── module_profile.json     # Pre-computed module fingerprint
 │      ├── file_info.json          # Structured analysis metadata
 │      └── file_info.md            # Human-readable analysis report
+│      ├── *_standalone_group_N.asm  # Assembly output (when -GenerateAsm)
+│      ├── *_<class>_group_N.asm     # Class method assembly groups
+│      └── *_library.asm             # Library/CRT assembly (separated)
 ├── logs/
 │   ├── batch_extractor_<timestamp>.log       # PowerShell batch execution log
 │   ├── <filename>_<hash>_<timestamp>.log     # IDA analysis logs
@@ -301,6 +331,7 @@ Requires `symchk.exe` from the [Windows SDK Debugging Tools](https://developer.m
 | `-NoRuntimeInfo`          | Skip .NET and delay-load DLL analysis       |
 | `-ForceReanalyze`         | Force re-analysis even if already processed |
 | `-NoGenerateCpp`          | Skip C++ code generation for AI review      |
+| `-GenerateAsm`            | Enable assembly (.asm) file generation (disabled by default) |
 
 #### Usage Examples
 
@@ -403,6 +434,8 @@ For single-file analysis or custom scripting, invoke the plugin directly via IDA
 --force-reanalyze            # Force re-analysis even if already complete
 --generate-cpp               # Generate C++ output files for AI review
 --cpp-output-dir <path>      # Custom directory for C++ output (defaults to extracted_raw_code/ next to db)
+--generate-asm               # Generate assembly (.asm) files with AI metadata headers
+--asm-output-dir <path>      # Custom directory for ASM output (defaults to same dir as C++ output)
 --thunk-depth N              # Maximum thunk resolution depth (default: 5)
 --min-call-conf N            # Minimum confidence for call validation (10-100)
 ```
@@ -413,7 +446,7 @@ DeepExtract produces structured data for several research workflows. Detailed do
 
 ### AI-Assisted Code Review
 
-The headless extractor generates C++ representations of decompiled binaries into the `extracted_code/` directory, organized by module. LLMs (Claude Code, Cursor, Codex) consume the `.cpp` files and `file_info.md` index to evaluate function logic, detect call patterns, and identify security-relevant invariants. For structured analysis workflows on top of this output, see the [AI Analysis Runtime](#ai-analysis-runtime) section.
+The headless extractor generates C++ representations of decompiled binaries and optionally assembly files with AI metadata headers into the `extracted_code/` directory, organized by module. LLMs (Claude Code, Cursor, Codex) consume the `.cpp` and/or `.asm` files alongside `file_info.md` to evaluate function logic, detect call patterns, and identify security-relevant invariants. Assembly output is particularly useful when the Hex-Rays decompiler is unavailable or not licensed for the target architecture. For structured analysis workflows on top of this output, see the [AI Analysis Runtime](#ai-analysis-runtime) section.
 
 ### Interactive Analysis and Structured Export
 
@@ -479,7 +512,7 @@ DeepExtract conforms to the IDA 9.x `plugmod_t` plugin architecture.
 - `deep_extract/pe_context_extractor.py` - Main analysis pipeline and orchestration
 - `deep_extract/extractor_core.py` - Public API hub; re-exports from all analysis modules
 - `deep_extract/config.py` - Configuration dataclass and validation
-- `deep_extract/constants.py` - Analysis limits, function type classification, dangerous API matching
+- `deep_extract/constants.py` - Analysis limits, function type classification, dangerous API matching, decompilation failure sentinel detection
 - `deep_extract/schema.py` - SQLite schema management and migration
 - `deep_extract/db_connection.py` - SQLite connection management and PRAGMA configuration
 - `deep_extract/logging_utils.py` - Logging, memoization caching, and utility functions
@@ -504,6 +537,7 @@ DeepExtract conforms to the IDA 9.x `plugmod_t` plugin architecture.
 **Output Generation:**
 
 - `deep_extract/cpp_generator.py` - C++ code generation for AI consumption
+- `deep_extract/asm_generator.py` - Assembly file generation with AI metadata headers
 - `deep_extract/module_profile.py` - Module fingerprint generation (`module_profile.json`)
 - `deep_extract/gui_dialog.py` - Interactive mode configuration dialog
 

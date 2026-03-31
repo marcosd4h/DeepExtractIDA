@@ -69,6 +69,8 @@ class AnalysisConfig:
     extract_runtime_info: bool = True
     generate_cpp: bool = False
     cpp_output_dir: Optional[Path] = None  # Custom directory for C++ output (defaults to extracted_raw_code/ next to db)
+    generate_asm: bool = False
+    asm_output_dir: Optional[Path] = None  # Custom directory for ASM output (defaults to same as cpp_output_dir or extracted_raw_code/)
     
     # Behavior flags
     force_reanalyze: bool = False
@@ -138,7 +140,7 @@ class AnalysisConfig:
             'extract_dangerous_apis', 'extract_strings', 'extract_stack_frame',
             'extract_globals', 'analyze_loops', 'extract_pe_info',
             'extract_pe_metadata', 'extract_advanced_pe', 'extract_runtime_info',
-            'generate_cpp', 'force_reanalyze', 'use_interprocedural_analysis'
+            'generate_cpp', 'generate_asm', 'force_reanalyze', 'use_interprocedural_analysis'
         ]
         for field_name in bool_fields:
             value = getattr(self, field_name)
@@ -250,6 +252,8 @@ class AnalysisConfig:
             extract_runtime_info=bool(args.get('extract_runtime_info', True)),
             generate_cpp=bool(args.get('generate_cpp', False)),
             cpp_output_dir=Path(args['cpp_output_dir']) if args.get('cpp_output_dir') else None,
+            generate_asm=bool(args.get('generate_asm', False)),
+            asm_output_dir=Path(args['asm_output_dir']) if args.get('asm_output_dir') else None,
             force_reanalyze=bool(args.get('force_reanalyze', False)),
             use_interprocedural_analysis=bool(args.get('use_interprocedural_analysis', True)),
             thunk_depth=thunk_depth,
@@ -277,6 +281,7 @@ class AnalysisConfig:
             'extract_advanced_pe': self.extract_advanced_pe,
             'extract_runtime_info': self.extract_runtime_info,
             'generate_cpp': self.generate_cpp,
+            'generate_asm': self.generate_asm,
             'force_reanalyze': self.force_reanalyze,
             'use_interprocedural_analysis': self.use_interprocedural_analysis,
             'thunk_depth': self.thunk_depth,
@@ -312,5 +317,6 @@ class AnalysisConfig:
             'analyze_loops': self.analyze_loops,
             'force_reanalyze': self.force_reanalyze,
             'generate_cpp': self.generate_cpp,
+            'generate_asm': self.generate_asm,
         }
 

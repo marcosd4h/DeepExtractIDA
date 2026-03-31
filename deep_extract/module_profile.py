@@ -18,6 +18,8 @@ import sys
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import constants
+
 from .logging_utils import debug_print
 from .db_connection import connect_sqlite as _connect_sqlite
 from .cpp_generator import CppGenerator
@@ -270,10 +272,8 @@ def _build_scale(cursor: sqlite3.Cursor,
 
     # Functions with usable decompiled output
     cursor.execute(
-        "SELECT COUNT(*) FROM functions "
-        "WHERE decompiled_code IS NOT NULL "
-        "AND decompiled_code != 'Decompiler not available' "
-        "AND decompiled_code NOT LIKE 'Decompilation failed:%'"
+        f"SELECT COUNT(*) FROM functions "
+        f"WHERE {constants.DECOMPILATION_FAILURE_SQL_FILTER}"
     )
     with_decompiled = cursor.fetchone()[0]
 
