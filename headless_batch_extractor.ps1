@@ -31,6 +31,9 @@
 .PARAMETER MaxConcurrentProcesses
     Maximum number of concurrent IDA processes to run (default: 4). Adjust based on system resources.
 
+.PARAMETER TimeoutHours
+    Maximum number of hours each IDA process may run before being terminated (default: 6).
+
 .PARAMETER Help
     Display detailed help information with usage examples.
 
@@ -63,6 +66,9 @@
 
 .EXAMPLE
     .\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Large\Dataset" -StorageDir "C:\Analysis" -MaxConcurrentProcesses 8
+
+.EXAMPLE
+    .\headless_batch_extractor.ps1 -ExtractDirRecursive "C:\Large\Dataset" -StorageDir "C:\Analysis" -TimeoutHours 50
 #>
 
 [CmdletBinding(DefaultParameterSetName = 'Directory')]
@@ -109,6 +115,10 @@ param(
     [Parameter(HelpMessage = "Maximum number of concurrent IDA processes (default: 4)")]
     [ValidateRange(1, 32)]
     [int]$MaxConcurrentProcesses = 4,
+
+    [Parameter(HelpMessage = "Maximum number of hours each IDA process may run before being terminated (default: 6)")]
+    [ValidateRange(1, [int]::MaxValue)]
+    [int]$TimeoutHours = 6,
 
     # Display help
     [Parameter(ParameterSetName = 'Help', HelpMessage = "Display detailed help information")]
@@ -183,6 +193,7 @@ function Show-Help {
     Write-Host "  -StorageDir <path>      Output directory for analysis results (required)"
     Write-Host "  -IdaPath <path>         Path to IDA Pro executable (auto-detected if not specified)"
     Write-Host "  -MaxConcurrentProcesses Number of parallel IDA processes (default: 4)"
+    Write-Host "  -TimeoutHours <hours>   Per-process timeout before termination (default: 6)"
     Write-Host "  -Help                   Display this help message"
     Write-Host ""
     Write-Host "ANALYSIS FLAGS (disable specific features):" -ForegroundColor Yellow
@@ -233,6 +244,9 @@ function Show-Help {
     Write-Host ""
     Write-Host "  # Use a custom symbol store path" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Binaries' -StorageDir 'C:\Analysis' -SymbolStorePath 'D:\MySymbols'"
+    Write-Host ""
+    Write-Host "  # Allow very large modules to run longer before timeout" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Binaries' -StorageDir 'C:\Analysis' -TimeoutHours 50"
     Write-Host ""
     Write-Host "  # Skip string extraction to reduce analysis time" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -NoExtractStrings"
@@ -286,8 +300,8 @@ $script:EXIT_PERMISSION_ERROR = 4      # Admin privileges required but not avail
 $script:EXIT_SCRIPT_MISSING = 5        # Required script files not found
 $script:EXIT_PROCESS_ERROR = 6         # Error starting or managing IDA processes
 
-# Timeout constant for IDA processes (6 hours in seconds)
-$script:IDA_PROCESS_TIMEOUT_SECONDS = 6 * 60 * 60  # 21600 seconds = 6 hours
+# Timeout for IDA processes.
+$script:IDA_PROCESS_TIMEOUT_SECONDS = $TimeoutHours * 60 * 60
 
 # Length of hash prefix used for unique file naming (from MD5 hash)
 $script:HASH_PREFIX_LENGTH = 10
