@@ -7,6 +7,8 @@ functions.
 """
 
 from typing import Dict, List, Tuple, Any, Optional
+import os
+import sys
 import ida_funcs
 import ida_bytes
 import ida_ua
@@ -24,6 +26,7 @@ from . import constants
 def extract_loop_analysis(function_ea: int, 
                          quantity_limit: bool = True, 
                          chunk_quantity: Optional[int] = None,
+                         max_depth: Optional[int] = None,
                          config: Optional[Any] = None) -> Dict[str, Any]:
     """
     Analyzes the control flow graph of a function to identify all loops.
@@ -35,6 +38,8 @@ def extract_loop_analysis(function_ea: int,
     :param quantity_limit: A flag to limit analysis on huge functions.
     :param chunk_quantity: The block count threshold to trigger the limit.
                           If None, uses DEFAULT_LOOP_BLOCK_LIMIT from constants.
+    :param max_depth: Recursion depth guard for graph traversals. If None, uses
+                      config, EXTRACTOR_LOOP_ANALYSIS_MAX_DEPTH, or the default.
     :param config: Optional AnalysisConfig object to get limit from config.
     :return: A dictionary containing the loops found and a count of them.
     """
@@ -49,8 +54,23 @@ def extract_loop_analysis(function_ea: int,
         else:
             # Fall back to constant
             chunk_quantity = constants.DEFAULT_LOOP_BLOCK_LIMIT
+
+    if max_depth is None:
+        if config and getattr(config, 'loop_analysis_max_depth', None) is not None:
+            max_depth = config.loop_analysis_max_depth
+        else:
+            raw_max_depth = os.environ.get("EXTRACTOR_LOOP_ANALYSIS_MAX_DEPTH", "")
+            try:
+                max_depth = int(raw_max_depth) if raw_max_depth else constants.DEFAULT_LOOP_ANALYSIS_MAX_DEPTH
+            except (TypeError, ValueError):
+                max_depth = constants.DEFAULT_LOOP_ANALYSIS_MAX_DEPTH
+    max_depth = max(1, int(max_depth))
     
     try:
+        previous_recursion_limit = sys.getrecursionlimit()
+        if previous_recursion_limit <= max_depth:
+            sys.setrecursionlimit(max_depth + 100)
+
         func = ida_funcs.get_func(function_ea)
         if not func:
             return {"error": "Function not found.", "loops": [], "loop_count": 0}
@@ -121,7 +141,12 @@ def extract_loop_analysis(function_ea: int,
         on_stack = [False] * n
         sccs = []
 
-        def strongconnect(v):
+        def strongconnect(v, depth=0):
+            if depth > max_depth:
+                raise RecursionError(
+                    f"loop analysis max depth exceeded ({max_depth}); "
+                    "set EXTRACTOR_LOOP_ANALYSIS_MAX_DEPTH or --loop-analysis-max-depth to increase"
+                )
             indices[v] = index_counter[0]
             lowlinks[v] = index_counter[0]
             index_counter[0] += 1
@@ -130,7 +155,7 @@ def extract_loop_analysis(function_ea: int,
 
             for w in successors[v]:
                 if indices[w] == -1:
-                    strongconnect(w)
+                    strongconnect(w, depth + 1)
                     lowlinks[v] = min(lowlinks[v], lowlinks[w])
                 elif on_stack[w]:
                     lowlinks[v] = min(lowlinks[v], indices[w])
@@ -223,15 +248,20 @@ def extract_loop_analysis(function_ea: int,
             stack_set = set()
             count = 0
 
-            def dfs(node_id):
+            def dfs(node_id, depth=0):
                 nonlocal count
+                if depth > max_depth:
+                    raise RecursionError(
+                        f"loop analysis max depth exceeded ({max_depth}); "
+                        "set EXTRACTOR_LOOP_ANALYSIS_MAX_DEPTH or --loop-analysis-max-depth to increase"
+                    )
                 visited.add(node_id)
                 stack_set.add(node_id)
                 for succ_id in successors[node_id]:
                     if succ_id not in loop_nodes:
                         continue
                     if succ_id not in visited:
-                        dfs(succ_id)
+                        dfs(succ_id, depth + 1)
                     elif succ_id in stack_set:
                         count += 1
                 stack_set.remove(node_id)
@@ -332,4 +362,7 @@ def extract_loop_analysis(function_ea: int,
     except Exception as e:
         debug_print(f"ERROR - [Loop Analysis] for 0x{function_ea:X}: {str(e)}")
         return {"error": str(e), "loops": [], "loop_count": 0}
+    finally:
+        if 'previous_recursion_limit' in locals() and sys.getrecursionlimit() != previous_recursion_limit:
+            sys.setrecursionlimit(previous_recursion_limit)
 

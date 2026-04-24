@@ -281,6 +281,8 @@ class DeepExtractModule(ida_idaapi.plugmod_t):
             debug_print(f"  Generate ASM: {config.generate_asm}")
             debug_print(f"  Thunk Depth: {config.thunk_depth}")
             debug_print(f"  Min Confidence: {config.min_conf}")
+            debug_print(f"  Loop Analysis Max Depth: {config.loop_analysis_max_depth}")
+            debug_print(f"  Max Xrefs: {config.max_xrefs}")
             debug_print("=" * 80)
             
             # Apply optional configuration overrides

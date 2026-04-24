@@ -775,6 +775,8 @@ def parse_arguments() -> Optional[dict]:
     parser.add_argument("--asm-output-dir", type=str, default=None, help="Directory for ASM output files (defaults to same as cpp-output-dir or extracted_raw_code/ next to db)")
     parser.add_argument("--thunk-depth", type=int, default=None)
     parser.add_argument("--min-call-conf", type=float, default=None)
+    parser.add_argument("--loop-analysis-max-depth", type=int, default=None)
+    parser.add_argument("--max-xrefs", type=int, default=None)
 
     # Process argv from IDA
     # idc.ARGV contains all arguments including script name
@@ -1272,7 +1274,10 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
         if options.get('analyze_loops') and extractor_core.HAS_LOOP_DETECTOR:
             loop_start = time.perf_counter()
             try:
-                loop_analysis = extractor_core.extract_loop_analysis(ea)
+                loop_analysis = extractor_core.extract_loop_analysis(
+                    ea,
+                    max_depth=options.get('loop_analysis_max_depth'),
+                )
             except Exception as e:
                 loop_analysis = None
                 analysis_errors.append({"stage": "loop_analysis", "error": str(e)})
@@ -1334,10 +1339,18 @@ def _process_single_function(ea: int, string_map: Dict[int, Any], has_decompiler
             'function_name': extractor_core.get_raw_function_name(ea),
             'assembly_code': '\n'.join(assembly_lines),
             'decompiled_code': decompiled_code,
-            'inbound_xrefs': json_safety.safe_serialize_xrefs(xref_data["inbound_xrefs"], "inbound_xrefs"),
-            'outbound_xrefs': json_safety.safe_serialize_xrefs(xref_data["outbound_xrefs"], "outbound_xrefs"),
-            'simple_inbound_xrefs': json_safety.safe_serialize_xrefs(simple_inbound, "simple_inbound_xrefs"),
-            'simple_outbound_xrefs': json_safety.safe_serialize_xrefs(simple_outbound, "simple_outbound_xrefs"),
+            'inbound_xrefs': json_safety.safe_serialize_xrefs(
+                xref_data["inbound_xrefs"], "inbound_xrefs", max_xrefs=options.get('max_xrefs')
+            ),
+            'outbound_xrefs': json_safety.safe_serialize_xrefs(
+                xref_data["outbound_xrefs"], "outbound_xrefs", max_xrefs=options.get('max_xrefs')
+            ),
+            'simple_inbound_xrefs': json_safety.safe_serialize_xrefs(
+                simple_inbound, "simple_inbound_xrefs", max_xrefs=options.get('max_xrefs')
+            ),
+            'simple_outbound_xrefs': json_safety.safe_serialize_xrefs(
+                simple_outbound, "simple_outbound_xrefs", max_xrefs=options.get('max_xrefs')
+            ),
             'vtable_contexts': json_safety.safe_serialize_vtable_contexts(xref_data["vtable_contexts"], "vtable_contexts"),
             'global_var_accesses': json_safety.to_json_safe(global_accesses, max_list_items=1000, field_name="global_var_accesses"),
             'loop_analysis': json_safety.safe_serialize_loop_analysis(loop_analysis, "loop_analysis"),
@@ -1368,6 +1381,8 @@ def extract_all_functions(sqlite_db_path, hashes, imports_json, exports_json, en
         'extract_stack_frame': kwargs.get('extract_stack_frame', True),
         'extract_globals': kwargs.get('extract_globals', True),
         'analyze_loops': kwargs.get('analyze_loops', True),
+        'loop_analysis_max_depth': kwargs.get('loop_analysis_max_depth'),
+        'max_xrefs': kwargs.get('max_xrefs'),
     }
 
     profile_enabled = get_log_level() in ("TRACE", "DEBUG")

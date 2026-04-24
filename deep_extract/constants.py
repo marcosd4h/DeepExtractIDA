@@ -39,8 +39,13 @@ LOW_ADDRESS_THRESHOLD = 0x10000        # 64KB - very low addresses are suspiciou
 # Jump Table Analysis Thresholds
 MIN_JUMP_TABLE_CONFIDENCE = 30.0       # Minimum confidence percentage to accept jump table detection
 
+# Xref Serialization Configuration
+DEFAULT_MAX_XREFS = 500000       # Default maximum xrefs serialized per JSON xref field
+MIN_MAX_XREFS = 1000             # Minimum accepted EXTRACTOR_MAX_XREFS override
+
 # Loop Analysis Configuration
 DEFAULT_LOOP_BLOCK_LIMIT = 5000  # Default maximum basic blocks before skipping loop analysis
+DEFAULT_LOOP_ANALYSIS_MAX_DEPTH = 5000  # Default recursion depth guard for loop graph traversal
 LOOP_ANALYSIS_WARNING_THRESHOLD = 500  # Warn when function exceeds this block count
 
 # Batch Processing Configuration

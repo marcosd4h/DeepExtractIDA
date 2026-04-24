@@ -34,6 +34,12 @@
 .PARAMETER TimeoutHours
     Maximum number of hours each IDA process may run before being terminated (default: 6).
 
+.PARAMETER LoopAnalysisMaxDepth
+    Maximum recursion depth for loop analysis graph traversal. Overrides the extractor default.
+
+.PARAMETER MaxXrefs
+    Maximum xrefs serialized per JSON xref field. Overrides the extractor default.
+
 .PARAMETER Help
     Display detailed help information with usage examples.
 
@@ -120,6 +126,12 @@ param(
     [ValidateRange(1, [int]::MaxValue)]
     [int]$TimeoutHours = 6,
 
+    [Parameter(HelpMessage = "Maximum recursion depth for loop analysis graph traversal (0 = extractor default)")]
+    [int]$LoopAnalysisMaxDepth = 0,
+
+    [Parameter(HelpMessage = "Maximum xrefs serialized per JSON xref field (0 = extractor default)")]
+    [int]$MaxXrefs = 0,
+
     # Display help
     [Parameter(ParameterSetName = 'Help', HelpMessage = "Display detailed help information")]
     [Alias('h', '?')]
@@ -194,6 +206,8 @@ function Show-Help {
     Write-Host "  -IdaPath <path>         Path to IDA Pro executable (auto-detected if not specified)"
     Write-Host "  -MaxConcurrentProcesses Number of parallel IDA processes (default: 4)"
     Write-Host "  -TimeoutHours <hours>   Per-process timeout before termination (default: 6)"
+    Write-Host "  -LoopAnalysisMaxDepth   Loop analysis recursion depth guard (extractor default if omitted)"
+    Write-Host "  -MaxXrefs <count>       Maximum xrefs serialized per JSON xref field (extractor default if omitted)"
     Write-Host "  -Help                   Display this help message"
     Write-Host ""
     Write-Host "ANALYSIS FLAGS (disable specific features):" -ForegroundColor Yellow
@@ -247,6 +261,12 @@ function Show-Help {
     Write-Host ""
     Write-Host "  # Allow very large modules to run longer before timeout" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Binaries' -StorageDir 'C:\Analysis' -TimeoutHours 50"
+    Write-Host ""
+    Write-Host "  # Increase loop analysis depth for complex CFGs" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Binaries' -StorageDir 'C:\Analysis' -LoopAnalysisMaxDepth 10000"
+    Write-Host ""
+    Write-Host "  # Increase xref serialization limit for dense modules" -ForegroundColor Gray
+    Write-Host "  .\headless_batch_extractor.ps1 -ExtractDirRecursive 'C:\Binaries' -StorageDir 'C:\Analysis' -MaxXrefs 1000000"
     Write-Host ""
     Write-Host "  # Skip string extraction to reduce analysis time" -ForegroundColor Gray
     Write-Host "  .\headless_batch_extractor.ps1 -ExtractDir 'C:\Binaries' -StorageDir 'C:\Analysis' -NoExtractStrings"
@@ -1262,6 +1282,14 @@ function Start-IDAProcesses {
             if (-not $analysisFlags.extract_pe_metadata) { $idaScriptArgs.Add("--no-pe-metadata") }
             if (-not $analysisFlags.extract_advanced_pe) { $idaScriptArgs.Add("--no-advanced-pe") }
             if (-not $analysisFlags.extract_runtime_info) { $idaScriptArgs.Add("--no-runtime-info") }
+            if ($analysisFlags.loop_analysis_max_depth -and $analysisFlags.loop_analysis_max_depth -gt 0) {
+                $idaScriptArgs.Add("--loop-analysis-max-depth")
+                $idaScriptArgs.Add([string]$analysisFlags.loop_analysis_max_depth)
+            }
+            if ($analysisFlags.max_xrefs -and $analysisFlags.max_xrefs -gt 0) {
+                $idaScriptArgs.Add("--max-xrefs")
+                $idaScriptArgs.Add([string]$analysisFlags.max_xrefs)
+            }
             if ($analysisFlags.force_reanalyze) { $idaScriptArgs.Add("--force-reanalyze") }
             if ($analysisFlags.generate_cpp) { 
                 $idaScriptArgs.Add("--generate-cpp")
@@ -2095,6 +2123,8 @@ $analysisFlags = @{
     extract_pe_metadata    = -not $NoPeMetadata.IsPresent
     extract_advanced_pe    = -not $NoAdvancedPe.IsPresent
     extract_runtime_info   = -not $NoRuntimeInfo.IsPresent
+    loop_analysis_max_depth = $LoopAnalysisMaxDepth
+    max_xrefs              = $MaxXrefs
     force_reanalyze        = $ForceReanalyze.IsPresent
     generate_cpp           = -not $NoGenerateCpp.IsPresent
     generate_asm           = $GenerateAsm.IsPresent

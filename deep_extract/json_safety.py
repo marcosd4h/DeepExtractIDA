@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from datetime import datetime
 from decimal import Decimal
 
+from . import constants
 from .logging_utils import debug_print
 
 
@@ -537,27 +538,32 @@ def apply_field_limits(xref_list: List[Any], max_xrefs: int = 10000) -> List[Any
 
 
 # Convenience functions for common field types
-def _get_max_xrefs() -> int:
+def _get_max_xrefs(override: Optional[int] = None) -> int:
     """Get the max xref limit from environment with sane fallback."""
-    raw = os.environ.get("EXTRACTOR_MAX_XREFS", "")
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        value = 50000
-    # Clamp to a reasonable range to avoid zero/negative or runaway values.
-    if value < 1000:
-        value = 1000
-    if value > 500000:
-        value = 500000
+    if override is not None:
+        value = int(override)
+    else:
+        raw = os.environ.get("EXTRACTOR_MAX_XREFS", "")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = constants.DEFAULT_MAX_XREFS
+    # Clamp only the lower bound; callers can opt into larger values when needed.
+    if value < constants.MIN_MAX_XREFS:
+        value = constants.MIN_MAX_XREFS
     return value
 
 
-def safe_serialize_xrefs(xrefs: List[Dict[str, Any]], field_name: str = "xrefs") -> str:
+def safe_serialize_xrefs(
+    xrefs: List[Dict[str, Any]],
+    field_name: str = "xrefs",
+    max_xrefs: Optional[int] = None,
+) -> str:
     """Safely serialize cross-reference list."""
-    max_xrefs = _get_max_xrefs()
-    if len(xrefs) > max_xrefs:
-        debug_print(f"WARNING - Xref list exceeds limit ({len(xrefs)} > {max_xrefs}); truncation may occur")
-    return to_json_safe(xrefs, max_list_items=max_xrefs, field_name=field_name)
+    effective_max_xrefs = _get_max_xrefs(max_xrefs)
+    if len(xrefs) > effective_max_xrefs:
+        debug_print(f"WARNING - Xref list exceeds limit ({len(xrefs)} > {effective_max_xrefs}); truncation may occur")
+    return to_json_safe(xrefs, max_list_items=effective_max_xrefs, field_name=field_name)
 
 
 def safe_serialize_strings(strings: List[str], field_name: str = "strings") -> str:

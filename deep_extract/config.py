@@ -43,6 +43,8 @@ class AnalysisConfig:
         force_reanalyze: Force re-analysis even if already completed
         thunk_depth: Maximum depth for thunk resolution
         min_conf: Minimum confidence for function call validation
+        loop_analysis_max_depth: Maximum recursion depth for loop analysis graph traversal
+        max_xrefs: Maximum xrefs serialized per JSON xref field
         
         # Computed file metadata
         file_hashes: MD5/SHA256 hashes of the input file
@@ -76,6 +78,8 @@ class AnalysisConfig:
     force_reanalyze: bool = False
     thunk_depth: Optional[int] = None
     min_conf: Optional[int] = None
+    loop_analysis_max_depth: Optional[int] = None
+    max_xrefs: Optional[int] = None
     
     # Advanced analysis options
     use_interprocedural_analysis: bool = True  # Enable deeper indirect call resolution
@@ -134,6 +138,16 @@ class AnalysisConfig:
                 raise ValueError(f"min_conf must be a number, got: {type(self.min_conf)}")
             if not 10 <= self.min_conf <= 100:
                 raise ValueError(f"min_conf must be between 10 and 100, got: {self.min_conf}")
+
+        if self.loop_analysis_max_depth is not None:
+            if not isinstance(self.loop_analysis_max_depth, int) or self.loop_analysis_max_depth < 1:
+                raise ValueError(
+                    f"loop_analysis_max_depth must be a positive integer, got: {self.loop_analysis_max_depth}"
+                )
+
+        if self.max_xrefs is not None:
+            if not isinstance(self.max_xrefs, int) or self.max_xrefs < 1:
+                raise ValueError(f"max_xrefs must be a positive integer, got: {self.max_xrefs}")
         
         # Validate boolean flags
         bool_fields = [
@@ -237,6 +251,24 @@ class AnalysisConfig:
                     raise ValueError(f"min_conf must be 10-100, got: {min_conf}")
             except (TypeError, ValueError) as e:
                 raise ValueError(f"Invalid min_conf: {e}")
+
+        loop_analysis_max_depth = args.get('loop_analysis_max_depth')
+        if loop_analysis_max_depth is not None:
+            try:
+                loop_analysis_max_depth = int(loop_analysis_max_depth)
+                if loop_analysis_max_depth < 1:
+                    raise ValueError(f"loop_analysis_max_depth must be positive, got: {loop_analysis_max_depth}")
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"Invalid loop_analysis_max_depth: {e}")
+
+        max_xrefs = args.get('max_xrefs')
+        if max_xrefs is not None:
+            try:
+                max_xrefs = int(max_xrefs)
+                if max_xrefs < 1:
+                    raise ValueError(f"max_xrefs must be positive, got: {max_xrefs}")
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"Invalid max_xrefs: {e}")
         
         return cls(
             sqlite_db_path=sqlite_db_path,
@@ -258,6 +290,8 @@ class AnalysisConfig:
             use_interprocedural_analysis=bool(args.get('use_interprocedural_analysis', True)),
             thunk_depth=thunk_depth,
             min_conf=min_conf,
+            loop_analysis_max_depth=loop_analysis_max_depth,
+            max_xrefs=max_xrefs,
         )
     
     def to_dict(self) -> dict:
@@ -286,6 +320,8 @@ class AnalysisConfig:
             'use_interprocedural_analysis': self.use_interprocedural_analysis,
             'thunk_depth': self.thunk_depth,
             'min_conf': self.min_conf,
+            'loop_analysis_max_depth': self.loop_analysis_max_depth,
+            'max_xrefs': self.max_xrefs,
         }
     
     def to_analysis_flags_json(self) -> str:
@@ -318,5 +354,7 @@ class AnalysisConfig:
             'force_reanalyze': self.force_reanalyze,
             'generate_cpp': self.generate_cpp,
             'generate_asm': self.generate_asm,
+            'loop_analysis_max_depth': self.loop_analysis_max_depth,
+            'max_xrefs': self.max_xrefs,
         }
 
